@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>医疗隐私保护系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/dicom-parser@1.8.3/dist/dicomParser.min.js"></script>
+</head>
+<body>
+    <h1>医疗数据上传</h1>
+    
+    <form id="uploadForm" enctype="multipart/form-data">
+        <div>
+            <label>诊断报告文本:</label>
+            <textarea name="text" rows="5" required></textarea>
+        </div>
+        
+        <div>
+            <label>DICOM文件:</label>
+            <input type="file" name="dicom" accept=".dcm">
+        </div>
+        
+        <button type="submit">上传并检测</button>
+    </form>
+    
+    <div id="results" style="display:none;">
+        <h2>检测结果</h2>
+        <div id="textResults"></div>
+        <div id="imageResults"></div>
+        <button id="protectBtn">执行保护</button>
+    </div>
+
+    <script>
+        document.getElementById('uploadForm').onsubmit = async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const response = await fetch('/api/ingest', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                // 显示检测结果
+                document.getElementById('results').style.display = 'block';
+                document.getElementById('textResults').innerHTML = 
+                    `检测到${result.entities.length}个敏感实体`;
+                
+                // 加载DICOM预览
+                if (result.dicom_path) {
+                    const dicomFile = await fetch(result.dicom_path);
+                    const arrayBuffer = await dicomFile.arrayBuffer();
+                    const data = dicomParser.parseDicom(arrayBuffer);
+                    // 实际项目中应使用cornerstone.js渲染图像
+                }
+            }
+        };
+    </script>
+</body>
+</html>
