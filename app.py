@@ -6,9 +6,7 @@ from flask import Flask, request, jsonify, render_template
 import torch
 import pandas as pd
 from services.crossmodal_service import CrossModalAttentionService
-from services.crypto_processor import HybridCryptoProcessor
-from services.policy_engine import PolicyEngine
-from services.storage_service import StorageService
+# 简化导入，去掉加密相关模块
 from services.audit_service import AuditLogger
 
 def create_app(config=None):
@@ -19,15 +17,6 @@ def create_app(config=None):
     # 初始化服务组件
     app.crossmodal_svc = CrossModalAttentionService(
         device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    app.crypto_processor = HybridCryptoProcessor(
-        kms_endpoint=app.config.get('KMS_ENDPOINT')
-    )
-    app.policy_engine = PolicyEngine(
-        config_path=app.config.get('POLICY_CONFIG')
-    )
-    app.storage_svc = StorageService(
-        output_dir=app.config.get('OUTPUT_DIR')
     )
     app.audit_logger = AuditLogger()
 
@@ -64,17 +53,28 @@ def create_app(config=None):
         try:
             data = request.json
             ingest_id = data["ingest_id"]
-            text = data["text"]
+            csv_path = data.get("csv_path")
             dicom_path = data.get("dicom_path")
             
-            result = app.crossmodal_svc.detect_phi_mapping(text, dicom_path)
-            app.storage_svc.save_detection(ingest_id, result)
+            # 如果提供了CSV路径，处理CSV文件
+            if csv_path:
+                result = app.crossmodal_svc.process_csv_detection(csv_path, dicom_path)
+                print(f"CSV检测结果: 实体数量={len(result.get('text_entities', []))}")
+            else:
+                # 兼容原有的文本处理方式
+                text = data.get("text", "")
+                result = app.crossmodal_svc.detect_phi_mapping(text, dicom_path)
+                print(f"文本检测结果: 实体数量={len(result.get('text_entities', []))}")
+            
             app.audit_logger.log(ingest_id, "detect", "system")
             
             return jsonify({
                 "ingest_id": ingest_id,
                 "entities": result["text_entities"],
                 "roi_regions": result["image_regions"],
+                "mappings": result["mappings"],
+                "cross_modal_risks": result["cross_modal_risks"],
+                "metrics": result["metrics"],
                 "status": "success"
             })
         except Exception as e:
@@ -83,53 +83,83 @@ def create_app(config=None):
 
     @app.route("/api/protect", methods=["POST"])
     def protect():
-        """数据脱敏处理"""
+        """为下一层提供检测结果接口"""
         try:
             data = request.json
             ingest_id = data["ingest_id"]
-            text = data["text"]
-            dicom_path = data.get("dicom_path")
             
-            detection = app.storage_svc.get_detection(ingest_id)
-            if not detection:
-                return jsonify({"error": "Detection result not found"}), 404
+            # 这里只是示例，实际应该从存储中获取检测结果
+            # 为下一层提供标准化的接口
+            protection_request = {
+                "session_id": ingest_id,
+                "detection_complete": True,
+                "next_layer_interface": {
+                    "text_entities": "已检测的文本实体列表",
+                    "dicom_metadata": "已提取的DICOM元数据",
+                    "cross_modal_risks": "跨模态风险列表",
+                    "roi_regions": "ROI区域信息",
+                    "risk_score": "综合风险分数",
+                    "protection_recommendations": "保护建议"
+                },
+                "status": "ready_for_protection_layer"
+            }
             
-            policy = app.policy_engine.decide_protection(detection["text_entities"])
-            protected_text = text
+            app.audit_logger.log(ingest_id, "protect_interface", "system")
+            return jsonify(protection_request)
+        except Exception as e:
+            app.audit_logger.log(ingest_id, "protect_error", str(e))
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/upload_csv", methods=["POST"])
+    def upload_csv():
+        """上传CSV文件"""
+        try:
+            csv_file = request.files.get("csv")
+            if not csv_file:
+                return jsonify({"error": "No CSV file provided"}), 400
             
-            for entity in detection["text_entities"]:
-                if policy[entity["entity_id"]]["action"] == "FPE":
-                    protected_text = protected_text.replace(
-                        entity["text"],
-                        app.crypto_processor.fpe_transform(
-                            entity["text"], 
-                            entity["type"]
-                        )
-                    )
+            # 保存CSV文件
+            csv_id = f"csv_{uuid.uuid4().hex[:8]}"
+            csv_path = str(Path(app.config['UPLOAD_FOLDER']) / f"{csv_id}.csv")
+            csv_file.save(csv_path)
             
-            protected_dicom = None
-            if dicom_path:
-                protected_dicom = app.crypto_processor.protect_dicom(
-                    dicom_path,
-                    detection["image_regions"]["roi_mask"]
-                )
-            
-            artifact_id = app.storage_svc.save_artifact(
-                ingest_id, 
-                {
-                    "text": protected_text,
-                    "dicom": protected_dicom
-                }
-            )
-            
-            app.audit_logger.log(artifact_id, "protect", "system")
+            app.audit_logger.log(csv_id, "csv_upload", "client")
             return jsonify({
-                "artifact_id": artifact_id,
-                "protected_text": protected_text,
+                "csv_id": csv_id,
+                "csv_path": csv_path,
                 "status": "success"
             })
         except Exception as e:
-            app.audit_logger.log(ingest_id, "protect_error", str(e))
+            app.audit_logger.log("system", "csv_upload_error", str(e))
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/upload_dicom", methods=["POST"])
+    def upload_dicom():
+        """上传DICOM文件目录"""
+        try:
+            dicom_files = request.files.getlist("dicom_files")
+            if not dicom_files:
+                return jsonify({"error": "No DICOM files provided"}), 400
+            
+            # 创建DICOM目录
+            dicom_id = f"dicom_{uuid.uuid4().hex[:8]}"
+            dicom_dir = Path(app.config['UPLOAD_FOLDER']) / dicom_id
+            dicom_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 保存DICOM文件
+            for dicom_file in dicom_files:
+                if dicom_file.filename.endswith('.dcm'):
+                    dicom_file.save(dicom_dir / dicom_file.filename)
+            
+            app.audit_logger.log(dicom_id, "dicom_upload", "client")
+            return jsonify({
+                "dicom_id": dicom_id,
+                "dicom_dir": str(dicom_dir),
+                "file_count": len(dicom_files),
+                "status": "success"
+            })
+        except Exception as e:
+            app.audit_logger.log("system", "dicom_upload_error", str(e))
             return jsonify({"error": str(e)}), 500
 
     @app.route("/api/process_batch", methods=["POST"])
@@ -143,32 +173,15 @@ def create_app(config=None):
             if not csv_path or not dicom_dir:
                 return jsonify({"error": "Missing csv_path or dicom_dir"}), 400
 
-            df = pd.read_csv(csv_path)
-            results = []
+            # 使用跨模态服务进行批量处理
+            result = app.crossmodal_svc.process_batch_data(
+                csv_path=csv_path,
+                dicom_dir=dicom_dir,
+                output_path=str(Path(app.config['OUTPUT_DIR']) / f"batch_{uuid.uuid4().hex[:8]}")
+            )
             
-            for _, row in df.iterrows():
-                dicom_path = Path(dicom_dir) / f"{row['dicom_id']}.dcm"
-                if not dicom_path.exists():
-                    continue
-                
-                result = app.crossmodal_svc.detect_phi_mapping(
-                    text=row['report_text'],
-                    dicom_path=str(dicom_path)
-                )
-                
-                case_id = f"case_{uuid.uuid4().hex[:8]}"
-                app.storage_svc.save_detection(case_id, result)
-                results.append({
-                    "case_id": case_id,
-                    "dicom_id": row['dicom_id'],
-                    "entities": result["text_entities"]
-                })
-            
-            return jsonify({
-                "processed_count": len(results),
-                "results": results,
-                "status": "success"
-            })
+            app.audit_logger.log("batch", "process_complete", "system")
+            return jsonify(result)
         except Exception as e:
             app.audit_logger.log("batch", "process_error", str(e))
             return jsonify({"error": str(e)}), 500
@@ -184,18 +197,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='医疗隐私保护API服务')
     parser.add_argument('--host', default='0.0.0.0', help='监听地址')
     parser.add_argument('--port', type=int, default=5000, help='监听端口')
-    parser.add_argument('--upload-folder', required=True, help='文件上传目录')
-    parser.add_argument('--kms-endpoint', required=True, help='KMS服务地址')
-    parser.add_argument('--policy-config', required=True, help='策略配置文件路径')
-    parser.add_argument('--output-dir', required=True, help='结果输出目录')
+    parser.add_argument('--upload-folder', default='./uploads', help='文件上传目录')
+    parser.add_argument('--output-dir', default='./output', help='结果输出目录')
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     app = create_app({
         'UPLOAD_FOLDER': args.upload_folder,
-        'KMS_ENDPOINT': args.kms_endpoint,
-        'POLICY_CONFIG': args.policy_config,
         'OUTPUT_DIR': args.output_dir
     })
     app.run(host=args.host, port=args.port)
