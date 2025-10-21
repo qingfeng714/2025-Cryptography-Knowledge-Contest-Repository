@@ -1,6 +1,7 @@
 import os
 import uuid
 import argparse
+import re
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template
 import torch
@@ -8,27 +9,47 @@ import pandas as pd
 from services.crossmodal_service import CrossModalAttentionService
 # 简化导入，去掉加密相关模块
 from services.audit_service import AuditLogger
+from services.cleanup_service import CleanupService
 
 def create_app(config=None):
     """应用工厂函数"""
     app = Flask(__name__)
     app.config.update(config or {})
+    
+    # 设置最大文件上传大小为500MB（支持批量上传）
+    app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 
     # 初始化服务组件
     app.crossmodal_svc = CrossModalAttentionService(
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
     app.audit_logger = AuditLogger()
+    app.cleanup_service = CleanupService(upload_dir=app.config['UPLOAD_FOLDER'], max_age_hours=24)
+    
+    # 启动定期清理任务（每1小时清理一次）
+    app.cleanup_service.start_periodic_cleanup(interval_hours=1)
+    print("[INFO] 文件清理服务已启动")
 
     # 确保上传目录存在
     os.makedirs(app.config.get('UPLOAD_FOLDER'), exist_ok=True)
+    
+    # 添加请求错误处理
+    @app.errorhandler(413)
+    def request_entity_too_large(error):
+        return jsonify({'error': '文件太大，最大支持500MB'}), 413
+    
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        app.logger.error(f'未处理的异常: {str(e)}')
+        return jsonify({'error': f'服务器错误: {str(e)}'}), 500
 
     @app.route("/api/ingest", methods=["POST"])
     def ingest():
         """数据接入端点"""
         try:
             text = request.form.get("text", "")
-            dicom_file = request.files.get("dicom")
+            # 支持两种参数名：dicom 和 dicom_file
+            dicom_file = request.files.get("dicom") or request.files.get("dicom_file")
             
             ingest_id = f"ingest_{uuid.uuid4().hex[:8]}"
             dicom_path = None
@@ -39,6 +60,7 @@ def create_app(config=None):
             
             app.audit_logger.log(ingest_id, "ingest", "client")
             return jsonify({
+                "file_id": ingest_id,  # 添加file_id字段，与前端一致
                 "ingest_id": ingest_id,
                 "dicom_path": dicom_path,
                 "status": "success"
@@ -52,9 +74,20 @@ def create_app(config=None):
         """跨模态敏感信息检测"""
         try:
             data = request.json
-            ingest_id = data["ingest_id"]
+            # 支持多种ID字段名
+            ingest_id = data.get("ingest_id") or data.get("csv_id") or f"detect_{uuid.uuid4().hex[:8]}"
+            
+            # 获取文件路径或ID
+            csv_id = data.get("csv_id")
+            dicom_id = data.get("dicom_id")
             csv_path = data.get("csv_path")
             dicom_path = data.get("dicom_path")
+            
+            # 如果提供的是ID，需要转换为路径
+            if csv_id and not csv_path:
+                csv_path = str(Path(app.config['UPLOAD_FOLDER']) / f"{csv_id}.csv")
+            if dicom_id and not dicom_path:
+                dicom_path = str(Path(app.config['UPLOAD_FOLDER']) / f"{dicom_id}.dcm")
             
             # 如果提供了CSV路径，处理CSV文件
             if csv_path:
@@ -70,16 +103,20 @@ def create_app(config=None):
             
             return jsonify({
                 "ingest_id": ingest_id,
-                "entities": result["text_entities"],
-                "roi_regions": result["image_regions"],
-                "mappings": result["mappings"],
-                "cross_modal_risks": result["cross_modal_risks"],
-                "metrics": result["metrics"],
+                "entities": result.get("text_entities", []),
+                "text_entities": result.get("text_entities", []),  # 添加此字段，与前端一致
+                "roi_regions": result.get("image_regions", {}),
+                "image_regions": result.get("image_regions", {}),  # 添加此字段
+                "mappings": result.get("mappings", []),
+                "cross_modal_risks": result.get("cross_modal_risks", []),
+                "metrics": result.get("metrics", {}),
                 "status": "success"
             })
         except Exception as e:
-            app.audit_logger.log(ingest_id, "detect_error", str(e))
-            return jsonify({"error": str(e)}), 500
+            error_msg = str(e)
+            print(f"检测错误: {error_msg}")
+            app.audit_logger.log("system", "detect_error", error_msg)
+            return jsonify({"error": error_msg, "status": "error"}), 500
 
     @app.route("/api/protect", methods=["POST"])
     def protect():
@@ -114,24 +151,36 @@ def create_app(config=None):
     def upload_csv():
         """上传CSV文件"""
         try:
-            csv_file = request.files.get("csv")
+            print(f"[DEBUG] 收到CSV上传请求")
+            print(f"[DEBUG] request.files: {request.files}")
+            print(f"[DEBUG] request.form: {request.form}")
+            
+            # 支持两种参数名：csv 和 csv_file
+            csv_file = request.files.get("csv") or request.files.get("csv_file")
             if not csv_file:
-                return jsonify({"error": "No CSV file provided"}), 400
+                print(f"[ERROR] 未找到CSV文件")
+                return jsonify({"error": "No CSV file provided", "status": "error"}), 400
             
             # 保存CSV文件
             csv_id = f"csv_{uuid.uuid4().hex[:8]}"
             csv_path = str(Path(app.config['UPLOAD_FOLDER']) / f"{csv_id}.csv")
             csv_file.save(csv_path)
             
+            print(f"[SUCCESS] CSV文件已保存: {csv_path}")
             app.audit_logger.log(csv_id, "csv_upload", "client")
+            
             return jsonify({
+                "file_id": csv_id,  # 添加file_id字段，与前端一致
                 "csv_id": csv_id,
                 "csv_path": csv_path,
+                "filename": csv_file.filename,
                 "status": "success"
             })
         except Exception as e:
-            app.audit_logger.log("system", "csv_upload_error", str(e))
-            return jsonify({"error": str(e)}), 500
+            error_msg = str(e)
+            print(f"[ERROR] CSV上传失败: {error_msg}")
+            app.audit_logger.log("system", "csv_upload_error", error_msg)
+            return jsonify({"error": error_msg, "status": "error"}), 500
 
     @app.route("/api/upload_dicom", methods=["POST"])
     def upload_dicom():
@@ -161,10 +210,199 @@ def create_app(config=None):
         except Exception as e:
             app.audit_logger.log("system", "dicom_upload_error", str(e))
             return jsonify({"error": str(e)}), 500
+    
+    @app.route("/api/batch_upload_dicom", methods=["POST"])
+    def batch_upload_dicom():
+        """批量上传DICOM文件并提取元数据"""
+        try:
+            dicom_files = request.files.getlist("dicom_files")
+            if not dicom_files:
+                return jsonify({"error": "No DICOM files provided"}), 400
+            
+            print(f"[INFO] 收到 {len(dicom_files)} 个DICOM文件")
+            
+            # 创建DICOM目录
+            dicom_id = f"batch_{uuid.uuid4().hex[:8]}"
+            dicom_dir = Path(app.config['UPLOAD_FOLDER']) / dicom_id
+            dicom_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 保存DICOM文件并提取元数据
+            from services.roi_service import DicomProcessor
+            processor = DicomProcessor(device='cpu')
+            metadata_list = []
+            
+            for i, dicom_file in enumerate(dicom_files):
+                if not dicom_file.filename.endswith('.dcm'):
+                    continue
+                    
+                # 保存文件
+                file_path = dicom_dir / dicom_file.filename
+                dicom_file.save(file_path)
+                
+                # 提取元数据
+                try:
+                    result = processor.process_dicom(file_path, try_burnedin=False)
+                    if result:
+                        metadata_list.append({
+                            'filename': dicom_file.filename,
+                            'filepath': str(file_path).replace('\\', '/'),  # 跨平台路径兼容
+                            'patient_id': result.patient_id or '',
+                            'patient_sex': result.patient_sex or '',
+                            'patient_age': result.patient_age or '',
+                            'study_date': result.study_date or '',
+                            'accession': result.accession or '',
+                            'institution': result.institution or ''
+                        })
+                        
+                    if (i + 1) % 100 == 0:
+                        print(f"[INFO] 已处理 {i + 1}/{len(dicom_files)} 个DICOM文件")
+                except Exception as e:
+                    print(f"[WARN] 处理 {dicom_file.filename} 失败: {e}")
+                    continue
+            
+            print(f"[SUCCESS] 成功提取 {len(metadata_list)} 个DICOM元数据")
+            app.audit_logger.log(dicom_id, "batch_dicom_upload", "client")
+            
+            return jsonify({
+                "dicom_id": dicom_id,
+                "dicom_dir": str(dicom_dir),
+                "total_files": len(dicom_files),
+                "processed": len(metadata_list),
+                "metadata_list": metadata_list,
+                "status": "success"
+            })
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[ERROR] 批量DICOM上传失败: {error_msg}")
+            app.audit_logger.log("system", "batch_dicom_error", error_msg)
+            return jsonify({"error": error_msg, "status": "error"}), 500
 
+    @app.route("/api/batch_detect", methods=["POST"])
+    def batch_detect():
+        """批量跨模态检测（CSV + DICOM元数据列表）"""
+        try:
+            data = request.json
+            csv_path = data.get("csv_path")
+            dicom_metadata_list = data.get("dicom_metadata_list", [])
+            
+            if not csv_path:
+                return jsonify({"error": "Missing csv_path"}), 400
+            
+            print(f"[INFO] 批量检测: CSV={csv_path}, DICOM元数据数={len(dicom_metadata_list)}")
+            
+            # 读取CSV（自动检测编码）
+            try:
+                df = pd.read_csv(csv_path, encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    print(f"[WARN] UTF-8解码失败，尝试GBK编码...")
+                    df = pd.read_csv(csv_path, encoding='gbk')
+                except UnicodeDecodeError:
+                    print(f"[WARN] GBK解码失败，尝试latin1编码...")
+                    df = pd.read_csv(csv_path, encoding='latin1')
+            
+            # 提取CSV中的patient_id
+            csv_patients = []
+            for idx, row in df.iterrows():
+                path_value = str(row.get('Path', ''))
+                match = re.search(r'patient(\d+)', path_value, re.IGNORECASE)
+                if match:
+                    csv_patients.append({
+                        'row_index': idx,
+                        'patient_id': 'patient' + match.group(1),
+                        'patient_number': match.group(1),
+                        'row_data': row.to_dict()
+                    })
+            
+            print(f"[INFO] CSV中找到 {len(csv_patients)} 个patient记录")
+            
+            # 创建DICOM patient_id索引
+            dicom_index = {}
+            for dicom_meta in dicom_metadata_list:
+                patient_id = dicom_meta.get('patient_id', '')
+                if patient_id:
+                    dicom_index[patient_id] = dicom_meta
+            
+            print(f"[INFO] DICOM元数据中找到 {len(dicom_index)} 个patient_id")
+            
+            # 匹配CSV和DICOM
+            matches = []
+            matched_count = 0
+            
+            for csv_patient in csv_patients:
+                csv_pid = csv_patient['patient_id']
+                dicom_meta = dicom_index.get(csv_pid)
+                
+                if dicom_meta:
+                    matched_count += 1
+                    matches.append({
+                        'patient_id': csv_pid,
+                        'row_index': csv_patient['row_index'],
+                        'dicom_file': dicom_meta.get('filename'),
+                        'matched': True,
+                        'csv_data': csv_patient['row_data'],
+                        'dicom_metadata': dicom_meta,
+                        'match_type': 'patient_id_exact_match',
+                        'confidence': 1.0,
+                        'risk_level': 'critical'
+                    })
+                else:
+                    matches.append({
+                        'patient_id': csv_pid,
+                        'row_index': csv_patient['row_index'],
+                        'dicom_file': 'None',
+                        'matched': False
+                    })
+            
+            print(f"[SUCCESS] 匹配完成: {matched_count}/{len(csv_patients)}")
+            print(f"[DEBUG] matches数组长度: {len(matches)}")
+            print(f"[DEBUG] 前3个match: {matches[:3] if len(matches) >= 3 else matches}")
+            
+            result = {
+                'csv_file': Path(csv_path).name,
+                'total_patients': len(csv_patients),
+                'processed': len(csv_patients),
+                'matched': matched_count,
+                'unmatched': len(csv_patients) - matched_count,
+                'match_rate': (matched_count / len(csv_patients) * 100) if csv_patients else 0,
+                'results': matches,
+                'status': 'success'
+            }
+            
+            print(f"[DEBUG] result keys: {result.keys()}")
+            print(f"[DEBUG] result['results']长度: {len(result['results'])}")
+            
+            app.audit_logger.log("batch_detect", "complete", f"matched={matched_count}")
+            
+            # 清理NaN值，转换为JSON安全的格式
+            import json
+            import numpy as np
+            
+            def clean_nan(obj):
+                """递归清理NaN值"""
+                if isinstance(obj, dict):
+                    return {k: clean_nan(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [clean_nan(item) for item in obj]
+                elif isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+                    return None
+                else:
+                    return obj
+            
+            result_cleaned = clean_nan(result)
+            return jsonify(result_cleaned)
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[ERROR] 批量检测失败: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            app.audit_logger.log("batch_detect", "error", error_msg)
+            return jsonify({"error": error_msg, "status": "error"}), 500
+    
     @app.route("/api/process_batch", methods=["POST"])
     def process_batch():
-        """批量处理CSV和DICOM数据"""
+        """批量处理CSV和DICOM数据（旧接口，保留兼容性）"""
         try:
             data = request.json
             csv_path = data.get("csv_path")

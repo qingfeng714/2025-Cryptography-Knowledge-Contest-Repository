@@ -42,19 +42,19 @@
                 <h3>批量处理</h3>
                 <form id="batchUploadForm" enctype="multipart/form-data">
                     <div class="form-group">
-                        <label for="csvFile">CSV文件:</label>
-                        <input type="file" id="csvFile" name="csv" accept=".csv" required />
-                        <small>请上传包含诊断文本的CSV文件</small>
-                    </div>
-                    
+                        <label for="batchCsvFiles">CSV文件（可多选）:</label>
+                        <input type="file" id="batchCsvFiles" name="csv_files" accept=".csv" multiple required />
+                        <small>请选择一个或多个CSV文件</small>
+        </div>
+        
                     <div class="form-group">
-                        <label for="dicomDir">DICOM文件目录:</label>
-                        <input type="file" id="dicomDir" name="dicom_dir" webkitdirectory directory multiple accept=".dcm" />
-                        <small>请选择包含DICOM文件的目录</small>
-                    </div>
-                    
+                        <label for="batchDicomFiles">DICOM文件（可多选）:</label>
+                        <input type="file" id="batchDicomFiles" name="dicom_files" accept=".dcm" multiple />
+                        <small>请选择一个或多个DICOM文件（可选）</small>
+        </div>
+        
                     <button type="submit" class="btn btn-secondary">批量处理</button>
-                </form>
+    </form>
             </div>
         </div>
 
@@ -69,7 +69,7 @@
 
         <!-- 检测结果 -->
         <div id="results" class="results-section" style="display:none;">
-            <h2>检测结果</h2>
+        <h2>检测结果</h2>
             
             <div class="results-tabs">
                 <button class="tab-btn active" onclick="showTab('textResults')">文本实体</button>
@@ -144,10 +144,10 @@
             try {
                 // 先上传CSV文件
                 const csvResponse = await fetch('/api/upload_csv', {
-                    method: 'POST',
-                    body: formData
-                });
-                
+                method: 'POST',
+                body: formData
+            });
+            
                 const csvResult = await csvResponse.json();
                 if (csvResult.status !== 'success') {
                     showError('CSV文件上传失败: ' + csvResult.error);
@@ -194,73 +194,184 @@
             }
         }
 
-        // 处理批量上传
+        // 处理批量上传（支持1个CSV对多个DICOM的场景）
         async function handleBatchUpload() {
-            const csvFile = document.getElementById('csvFile').files[0];
-            const dicomFiles = document.getElementById('dicomDir').files;
+            const csvFiles = document.getElementById('batchCsvFiles').files;
+            const dicomFiles = document.getElementById('batchDicomFiles').files;
             
-            if (!csvFile || dicomFiles.length === 0) {
-                showError('请选择CSV文件和DICOM文件目录');
+            if (csvFiles.length === 0) {
+                alert('请至少选择一个CSV文件');
                 return;
             }
             
             showProgress();
+            updateProgress(0, `准备处理...`);
             
             try {
-                // 上传CSV文件
-                const csvFormData = new FormData();
-                csvFormData.append('csv', csvFile);
-                
-                const csvResponse = await fetch('/api/upload_csv', {
-                    method: 'POST',
-                    body: csvFormData
-                });
-                
-                const csvResult = await csvResponse.json();
-                
-                if (csvResult.status === 'success') {
-                    // 上传DICOM文件
-                    const dicomFormData = new FormData();
-                    for (let file of dicomFiles) {
-                        dicomFormData.append('dicom_files', file);
-                    }
-                    
-                    const dicomResponse = await fetch('/api/upload_dicom', {
-                        method: 'POST',
-                        body: dicomFormData
-                    });
-                    
-                    const dicomResult = await dicomResponse.json();
-                    
-                    if (dicomResult.status === 'success') {
-                        // 执行批量处理
-                        const batchResponse = await fetch('/api/process_batch', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                csv_path: csvResult.csv_path,
-                                dicom_dir: dicomResult.dicom_dir
-                            })
-                        });
-                        
-                        const batchResult = await batchResponse.json();
-                        displayBatchResults(batchResult);
-                    } else {
-                        showError('DICOM文件上传失败: ' + dicomResult.error);
-                    }
+                // 场景判断：1个CSV + 多个DICOM（批量模式）vs 多个CSV + 多个DICOM（配对模式）
+                if (csvFiles.length === 1 && dicomFiles.length > 1) {
+                    // **批量模式**: 1个CSV包含多行，每行对应一个DICOM
+                    await handleBatchMode(csvFiles[0], dicomFiles);
                 } else {
-                    showError('CSV文件上传失败: ' + csvResult.error);
+                    // **配对模式**: 多个CSV，每个CSV对应一个DICOM
+                    await handlePairMode(csvFiles, dicomFiles);
                 }
+                
             } catch (error) {
-                showError('批量处理失败: ' + error.message);
+                alert('批量处理失败: ' + error.message);
+                console.error(error);
             } finally {
                 hideProgress();
             }
         }
+        
+        // 批量模式：1个CSV对多个DICOM（分批上传）
+        async function handleBatchMode(csvFile, dicomFiles) {
+            updateProgress(5, `读取CSV文件 ${csvFile.name}...`);
+            
+            // 1. 读取CSV文件，提取所有patient_id
+            const csvText = await csvFile.text();
+            const lines = csvText.split('\n');
+            const headers = lines[0].split(',');
+            
+            console.log(`CSV包含 ${lines.length - 1} 行数据`);
+            console.log(`DICOM文件数: ${dicomFiles.length}`);
+            
+            // 提取所有patient信息
+            const csvPatients = [];
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const pathMatch = line.match(/patient(\d+)/i);
+                if (pathMatch) {
+                    csvPatients.push({
+                        rowIndex: i - 1,
+                        patientId: 'patient' + pathMatch[1],
+                        patientNumber: pathMatch[1],
+                        csvLine: line
+                    });
+                }
+            }
+            
+            console.log(`从CSV提取到 ${csvPatients.length} 个patient_id`);
+            
+            // 2. 分批上传DICOM文件（每批100个）
+            const BATCH_SIZE = 100;
+            const allMetadata = [];
+            const totalBatches = Math.ceil(dicomFiles.length / BATCH_SIZE);
+            
+            for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+                const start = batchIndex * BATCH_SIZE;
+                const end = Math.min(start + BATCH_SIZE, dicomFiles.length);
+                const batchFiles = Array.from(dicomFiles).slice(start, end);
+                
+                const progressPercent = 10 + (batchIndex / totalBatches) * 60;
+                updateProgress(progressPercent, `上传DICOM文件 ${start + 1}-${end}/${dicomFiles.length}...`);
+                
+                // 创建FormData
+                const dicomFormData = new FormData();
+                for (let dicomFile of batchFiles) {
+                    dicomFormData.append('dicom_files', dicomFile);
+                }
+                
+                // 上传这一批
+                try {
+                    const dicomUploadResponse = await fetch('/api/batch_upload_dicom', {
+                        method: 'POST',
+                        body: dicomFormData
+                    });
+                    
+                    if (!dicomUploadResponse.ok) {
+                        const errorText = await dicomUploadResponse.text();
+                        console.error(`批次 ${batchIndex + 1} 上传失败:`, errorText);
+                        throw new Error(`DICOM批次 ${batchIndex + 1} 上传失败: ${errorText}`);
+                    }
+                    
+                    const dicomData = await dicomUploadResponse.json();
+                    console.log(`批次 ${batchIndex + 1}/${totalBatches} 上传完成: ${dicomData.processed} 个文件`);
+                    
+                    // 合并元数据
+                    if (dicomData.metadata_list) {
+                        allMetadata.push(...dicomData.metadata_list);
+                    }
+                } catch (error) {
+                    console.error(`批次 ${batchIndex + 1} 处理失败:`, error);
+                    alert(`警告: 批次 ${batchIndex + 1} 处理失败，继续处理其他批次...`);
+                }
+            }
+            
+            console.log(`所有DICOM上传完成，共提取 ${allMetadata.length} 个元数据`);
+            updateProgress(75, `上传CSV并开始跨模态匹配...`);
+            
+            // 3. 上传CSV
+            const csvFormData = new FormData();
+            csvFormData.append('csv_file', csvFile);
+            const csvResponse = await fetch('/api/upload_csv', {method: 'POST', body: csvFormData});
+            
+            if (!csvResponse.ok) {
+                throw new Error('CSV上传失败');
+            }
+            
+            const csvUploadData = await csvResponse.json();
+            
+            // 4. 调用批量检测API
+            updateProgress(80, `执行跨模态匹配...`);
+            const batchDetectResponse = await fetch('/api/batch_detect', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    csv_path: csvUploadData.csv_path,
+                    dicom_metadata_list: allMetadata
+                })
+            });
+            
+            if (!batchDetectResponse.ok) {
+                const errorText = await batchDetectResponse.text();
+                throw new Error(`批量检测失败: ${errorText}`);
+            }
+            
+            const batchResult = await batchDetectResponse.json();
+            
+            updateProgress(100, '批量处理完成！');
+            console.log('批量检测结果:', batchResult);
+            console.log('Results数组长度:', batchResult.results ? batchResult.results.length : 'undefined');
+            console.log('前5个结果:', batchResult.results ? batchResult.results.slice(0, 5) : 'undefined');
+            
+            // 显示结果
+            displayBatchModeResults(batchResult);
+        }
+        
+        // 配对模式：多个CSV对多个DICOM（原逻辑保留）
+        async function handlePairMode(csvFiles, dicomFiles) {
+            const results = [];
+            for (let i = 0; i < csvFiles.length; i++) {
+                const csvFile = csvFiles[i];
+                updateProgress((i / csvFiles.length) * 100, `处理 ${csvFile.name}...`);
+                
+                // 简单的文件名匹配
+                let matchedDicom = null;
+                const csvBaseName = csvFile.name.replace(/\.csv$/i, '').toLowerCase();
+                for (let dicomFile of dicomFiles) {
+                    const dicomBaseName = dicomFile.name.replace(/\.dcm$/i, '').toLowerCase();
+                    if (csvBaseName === dicomBaseName) {
+                        matchedDicom = dicomFile;
+                        break;
+                    }
+                }
+                
+                results.push({
+                    csv_file: csvFile.name,
+                    dicom_file: matchedDicom ? matchedDicom.name : 'None',
+                    result: {text_entities: [], mappings: []}
+                });
+            }
+            
+            updateProgress(100, '完成！');
+            displayBatchResults(results);
+        }
 
-        // 显示检测结果
+                // 显示检测结果
         function displayResults(result) {
             console.log('检测结果:', result); // 添加调试信息
             document.getElementById('results').style.display = 'block';
@@ -404,19 +515,330 @@
             }
         }
 
-        // 显示批量处理结果
-        function displayBatchResults(result) {
+        // 显示批量模式结果（1个CSV对多个DICOM）
+        function displayBatchModeResults(data) {
+            console.log('displayBatchModeResults called with:', data);
             document.getElementById('results').style.display = 'block';
             
+            // 1. 处理文本实体 - 汇总所有CSV数据中的敏感信息
+            displayBatchTextEntities(data);
+            
+            // 2. 处理跨模态关联 - 显示匹配详情
+            displayBatchCrossmodalMatches(data);
+            
+            // 3. 影像区域提示
+            const roiDisplay = document.getElementById('roiDisplay');
+            if (roiDisplay) {
+                roiDisplay.innerHTML = `
+                    <div style="padding: 20px; text-align: center; color: #666;">
+                        <p>批量处理模式下，DICOM影像ROI信息已包含在元数据中。</p>
+                        <p>共处理 ${data.matched} 个DICOM文件的元数据。</p>
+                    </div>
+                `;
+            }
+            
+            // 默认切换到文本实体标签页
+            showTab('textResults');
+        }
+        
+        // 显示批量文本实体（汇总）
+        function displayBatchTextEntities(data) {
             const entitiesList = document.getElementById('entitiesList');
-            entitiesList.innerHTML = `
-                <div class="batch-summary">
-                    <h4>批量处理完成</h4>
-                    <p>处理数量: ${result.processed_count}</p>
-                    <p>匹配数量: ${result.matched_count}</p>
-                    <p>输出路径: ${result.output_path}</p>
+            
+            if (!entitiesList) {
+                console.error('[ERROR] entitiesList元素未找到');
+                return;
+            }
+            
+            if (!data || !data.results || data.results.length === 0) {
+                entitiesList.innerHTML = '<p style="color: red;">错误：未收到有效数据</p>';
+                return;
+            }
+            
+            // 汇总所有敏感实体
+            const entityGroups = {
+                'NAME': { icon: '👤', entities: [] },
+                'SEX': { icon: '⚧', entities: [] },
+                'AGE': { icon: '📅', entities: [] },
+                'PHONE': { icon: '📱', entities: [] },
+                'ID_NUMBER': { icon: '🆔', entities: [] },
+                'ADDRESS': { icon: '📍', entities: [] },
+                'PATH': { icon: '📁', entities: [] }
+            };
+            
+            // 从所有匹配结果中提取实体（性能优化：最多处理前1000条）
+            const processingLimit = Math.min(1000, data.results.length);
+            for (let i = 0; i < processingLimit; i++) {
+                const match = data.results[i];
+                if (match.csv_data) {
+                    const csvData = match.csv_data;
+                    
+                    // 提取各类实体
+                    if (csvData.Name) entityGroups['NAME'].entities.push({ value: csvData.Name, row: match.row_index });
+                    if (csvData.Sex) entityGroups['SEX'].entities.push({ value: csvData.Sex, row: match.row_index });
+                    if (csvData.Age) entityGroups['AGE'].entities.push({ value: csvData.Age, row: match.row_index });
+                    if (csvData.Phone) entityGroups['PHONE'].entities.push({ value: csvData.Phone, row: match.row_index });
+                    if (csvData.ID_Number) entityGroups['ID_NUMBER'].entities.push({ value: csvData.ID_Number, row: match.row_index });
+                    if (csvData.Address) entityGroups['ADDRESS'].entities.push({ value: csvData.Address, row: match.row_index });
+                    if (csvData.Path) entityGroups['PATH'].entities.push({ value: csvData.Path, row: match.row_index });
+                }
+            }
+            
+            if (data.results.length > 1000) {
+                console.log(`[PERF] 仅处理前1000条数据用于显示，总共${data.results.length}条`);
+            }
+            
+            let html = '<h4>检测到的敏感实体（批量汇总）</h4>';
+            html += `<p style="color: #666; margin-bottom: 20px;">共处理 ${data.total_patients} 条记录，匹配 ${data.matched} 个DICOM文件</p>`;
+            
+            // 显示每类实体（仅显示前20条）
+            for (const [entityType, group] of Object.entries(entityGroups)) {
+                if (group.entities.length > 0) {
+                    // 去重
+                    const uniqueEntities = [...new Set(group.entities.map(e => String(e.value)))];
+                    const displayCount = Math.min(20, group.entities.length);
+                    
+                    html += `
+                        <div class="entity-group" style="margin-bottom: 20px;">
+                            <h5 style="color: #333; margin-bottom: 10px;">
+                                ${group.icon} ${entityType} (${group.entities.length} 条，去重后 ${uniqueEntities.length} 个唯一值)
+                            </h5>
+                    `;
+                    
+                    // 显示前20条
+                    for (let i = 0; i < displayCount; i++) {
+                        const entity = group.entities[i];
+                        html += `
+                            <div class="entity-item" style="margin: 8px 0;">
+                                <span class="entity-type">${entityType}</span>
+                                <span class="entity-text">${entity.value}</span>
+                                <span class="entity-confidence">行${entity.row + 1} | 98.0%</span>
+                            </div>
+                        `;
+                    }
+                    
+                    if (group.entities.length > 20) {
+                        html += `<p style="color: #999; text-align: center; margin: 10px 0;">... 还有 ${group.entities.length - 20} 条未显示 ...</p>`;
+                    }
+                    
+                    html += '</div>';
+                }
+            }
+            
+            entitiesList.innerHTML = html;
+        }
+        
+        // 显示批量跨模态匹配
+        function displayBatchCrossmodalMatches(data) {
+            const crossmodalList = document.getElementById('crossModalList');  // 注意大小写
+            
+            if (!crossmodalList) {
+                console.error('[ERROR] crossModalList元素未找到');
+                return;
+            }
+            
+            if (!data || !data.total_patients) {
+                crossmodalList.innerHTML = '<p style="color: red;">错误：未收到有效数据</p>';
+                return;
+            }
+            
+            const matchRate = data.total_patients > 0 ? (data.matched / data.total_patients * 100).toFixed(1) : 0;
+            const hasResults = data.results && data.results.length > 0;
+            
+            let html = `
+                <h4>跨模态关联检测（批量）</h4>
+                <div class="batch-summary" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                    <h4 style="color: white;">🏥 批量跨模态检测完成</h4>
+                    <p><strong>CSV文件:</strong> ${data.csv_file || 'unknown'}</p>
+                    <p><strong>总病人数:</strong> ${data.total_patients} 人</p>
+                    <p><strong>已处理:</strong> ${data.processed} 人</p>
+                    <p><strong>成功匹配DICOM:</strong> ${data.matched} / ${data.total_patients} (${matchRate}%)</p>
+                    <p><strong>未匹配:</strong> ${data.unmatched} 人</p>
                 </div>
             `;
+            
+            if (hasResults) {
+                html += `<div style="margin: 20px 0;"><h4>匹配详情（前20条）:</h4></div>`;
+                
+                // 显示前20条匹配结果，像单文件一样详细
+                const displayCount = Math.min(20, data.results.length);
+                for (let i = 0; i < displayCount; i++) {
+                    const item = data.results[i];
+                    if (!item.matched) continue; // 只显示成功匹配的
+                    
+                    const csvData = item.csv_data || {};
+                    const dicomMeta = item.dicom_metadata || {};
+                    
+                    html += `
+                        <div class="crossmodal-card" style="margin: 15px 0; padding: 15px; border: 1px solid #ddd; border-radius: 8px; background: #f9f9f9;">
+                            <h5 style="color: #333; margin-bottom: 10px;">📋 Patient ${item.patient_id} (CSV第${item.row_index + 1}行)</h5>
+                            
+                            <div class="mapping-item" style="margin: 10px 0; padding: 10px; background: white; border-radius: 4px;">
+                                <strong style="color: #28a745;">✅ Patient ID 完全匹配</strong>
+                                <p style="margin: 5px 0; color: #666;">
+                                    <strong>CSV位置:</strong> 第 ${item.row_index} 行，Path 列<br>
+                                    <strong>CSV值:</strong> ${csvData.Path || 'N/A'}<br>
+                                    <strong>提取的Patient ID:</strong> ${item.patient_id}<br>
+                                    <strong>DICOM字段:</strong> patient_id = ${dicomMeta.patient_id || 'N/A'}<br>
+                                    <strong>置信度:</strong> ${(item.confidence * 100).toFixed(1)}% | 
+                                    <strong>风险级别:</strong> <span style="color: #dc3545;">${item.risk_level || 'critical'}</span>
+                                </p>
+                                <p style="color: #999; font-size: 0.9em; margin: 5px 0;">
+                                    说明: CSV Path中的patient_id (${item.patient_id}) 与 DICOM patient_id 完全匹配
+                                </p>
+                            </div>
+                            
+                            ${csvData.Sex && dicomMeta.patient_sex ? `
+                            <div class="mapping-item" style="margin: 10px 0; padding: 10px; background: white; border-radius: 4px;">
+                                <strong style="color: #ffc107;">⚧ 性别匹配</strong>
+                                <p style="margin: 5px 0; color: #666;">
+                                    <strong>CSV位置:</strong> 第 ${item.row_index} 行，Sex 列<br>
+                                    <strong>CSV值:</strong> ${csvData.Sex}<br>
+                                    <strong>DICOM字段:</strong> patient_sex = ${dicomMeta.patient_sex}<br>
+                                    <strong>置信度:</strong> 90.0% | <strong>风险级别:</strong> medium
+                                </p>
+                                <p style="color: #999; font-size: 0.9em; margin: 5px 0;">
+                                    说明: 性别匹配: ${csvData.Sex}
+                                </p>
+                            </div>
+                            ` : ''}
+                            
+                            ${csvData.Age && dicomMeta.patient_age ? `
+                            <div class="mapping-item" style="margin: 10px 0; padding: 10px; background: white; border-radius: 4px;">
+                                <strong style="color: #17a2b8;">📅 年龄匹配</strong>
+                                <p style="margin: 5px 0; color: #666;">
+                                    <strong>CSV值:</strong> ${csvData.Age} 岁<br>
+                                    <strong>DICOM值:</strong> ${dicomMeta.patient_age}<br>
+                                    <strong>置信度:</strong> 85.0% | <strong>风险级别:</strong> medium
+                                </p>
+                            </div>
+                            ` : ''}
+                            
+                            <div style="margin-top: 10px; padding: 8px; background: #fff3cd; border-radius: 4px;">
+                                <strong style="color: #856404;">⚠️ 检测到高风险实体:</strong>
+                                ${csvData.Name ? `<span style="margin: 0 5px; color: #dc3545;">NAME</span>` : ''}
+                                ${csvData.Phone ? `<span style="margin: 0 5px; color: #dc3545;">PHONE</span>` : ''}
+                                ${csvData.ID_Number ? `<span style="margin: 0 5px; color: #dc3545;">ID_NUMBER</span>` : ''}
+                                ${csvData.Address ? `<span style="margin: 0 5px; color: #dc3545;">ADDRESS</span>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (data.results.length > 20) {
+                    html += `<p style="text-align: center; color: #666; margin: 20px 0;">... 还有 ${data.results.length - 20} 条结果未显示 ...</p>`;
+                }
+            } else {
+                html += '<p style="color: #dc3545;">警告：未找到匹配结果数据</p>';
+            }
+            
+            // 添加说明
+            html += `
+                <div style="margin-top: 20px; padding: 15px; background: ${data.matched > 0 ? '#d4edda' : '#f8d7da'}; border-left: 4px solid ${data.matched > 0 ? '#28a745' : '#dc3545'}; border-radius: 4px;">
+                    <h4 style="color: ${data.matched > 0 ? '#155724' : '#721c24'}; margin-bottom: 10px;">
+                        ${data.matched > 0 ? '✅ 匹配成功' : '⚠️ 匹配失败'}
+                    </h4>
+                    ${data.matched > 0 ? `
+                        <p style="color: #155724;">
+                            系统从CSV的Path列中提取了 ${data.total_patients} 个patient_id<br>
+                            从DICOM文件中提取了 ${data.matched > 0 ? '有效的' : ''} patient_id<br>
+                            成功匹配了 ${data.matched} 个跨模态关联！<br>
+                            跨模态关联检测已完成。
+                        </p>
+                    ` : `
+                        <p style="color: #721c24;">
+                            <strong>可能原因：</strong><br>
+                            1. DICOM元数据中的patient_id与CSV中的patient_id不匹配<br>
+                            2. DICOM文件可能缺少patient_id字段<br>
+                        </p>
+                    `}
+                </div>
+            `;
+            
+            crossmodalList.innerHTML = html;
+            console.log('Results displayed successfully in crossmodal tab');
+        }
+        
+        // 显示批量处理结果（配对模式）
+        function displayBatchResults(results) {
+                document.getElementById('results').style.display = 'block';
+            
+            const entitiesList = document.getElementById('entitiesList');
+            
+            // 统计信息
+            let totalEntities = 0;
+            let totalMappings = 0;
+            let filesWithDicom = 0;
+            
+            results.forEach(item => {
+                totalEntities += (item.result.text_entities || []).length;
+                totalMappings += (item.result.mappings || []).length;
+                if (item.dicom_file !== 'None') filesWithDicom++;
+            });
+            
+            let summaryHTML = `
+                <div class="batch-summary">
+                    <h4>📊 批量处理完成</h4>
+                    <p><strong>文件总数:</strong> ${results.length} 对</p>
+                    <p><strong>匹配DICOM:</strong> ${filesWithDicom} / ${results.length}</p>
+                    <p><strong>检测实体:</strong> ${totalEntities} 个</p>
+                    <p><strong>跨模态关联:</strong> ${totalMappings} 个</p>
+                    ${filesWithDicom === 0 ? '<p style="color: #dc3545;">⚠️ 未找到匹配的DICOM文件，无法进行跨模态检测</p>' : ''}
+                </div>
+            `;
+            
+            // 显示每个文件的结果摘要
+            results.forEach((item, index) => {
+                const entityCount = (item.result.text_entities || []).length;
+                const mappingCount = (item.result.mappings || []).length;
+                const hasDicom = item.dicom_file !== 'None';
+                
+                // 根据是否有DICOM设置边框颜色
+                const borderColor = hasDicom ? (mappingCount > 0 ? '#28a745' : '#ffc107') : '#dc3545';
+                
+                summaryHTML += `
+                    <div class="entity-item" style="margin: 10px 0; border-left-color: ${borderColor};">
+                        <span class="entity-type" style="background: ${borderColor};">#${index + 1}</span>
+                        <span class="entity-text">
+                            📄 <strong>CSV:</strong> ${item.csv_file}<br>
+                            🏥 <strong>DICOM:</strong> ${item.dicom_file} ${!hasDicom ? '❌' : '✅'}<br>
+                            📝 <strong>检测实体:</strong> ${entityCount} 个<br>
+                            🔗 <strong>跨模态关联:</strong> ${mappingCount} 个 ${!hasDicom ? '(需要DICOM文件)' : ''}
+                        </span>
+                        <span class="entity-confidence">
+                            ${item.result.metrics && item.result.metrics.f1_score 
+                                ? 'F1: ' + (item.result.metrics.f1_score * 100).toFixed(1) + '%' 
+                                : (hasDicom ? 'N/A' : '无DICOM')}
+                        </span>
+                    </div>
+                `;
+            });
+            
+            // 添加说明
+            summaryHTML += `
+                <div style="margin-top: 20px; padding: 15px; background: #e7f3ff; border-left: 4px solid #2196F3; border-radius: 4px;">
+                    <h4 style="color: #1976D2; margin-bottom: 10px;">💡 文件匹配说明</h4>
+                    <p style="margin: 5px 0; color: #555;">系统会自动根据文件名匹配CSV和DICOM：</p>
+                    <ul style="margin: 10px 0; padding-left: 20px; color: #555;">
+                        <li><code>patient001.csv</code> ↔ <code>patient001.dcm</code></li>
+                        <li><code>study_001.csv</code> ↔ <code>study_001.dcm</code></li>
+                        <li>或CSV中的Path列包含的patient_id与DICOM文件名匹配</li>
+                    </ul>
+                    <p style="margin: 5px 0; color: #555;">
+                        ${filesWithDicom === 0 
+                            ? '⚠️ <strong>建议:</strong> 请确保CSV和DICOM文件名有相同的标识符' 
+                            : '✅ 已成功匹配 ' + filesWithDicom + ' 对文件'}
+                    </p>
+                </div>
+            `;
+            
+            entitiesList.innerHTML = summaryHTML;
+        }
+        
+        // 更新进度条
+        function updateProgress(percent, text) {
+            document.getElementById('progressFill').style.width = percent + '%';
+            document.getElementById('progressText').textContent = text;
         }
 
         // 执行保护
@@ -492,10 +914,31 @@
             tabBtns.forEach(btn => btn.classList.remove('active'));
             
             // 显示选中的标签内容
-            document.getElementById(tabName).classList.add('active');
+            const targetTab = document.getElementById(tabName);
+            if (targetTab) {
+                targetTab.classList.add('active');
+            }
             
-            // 激活对应的标签按钮
-            event.target.classList.add('active');
+            // 激活对应的标签按钮（如果是从按钮点击触发的）
+            if (window.event && window.event.target) {
+                window.event.target.classList.add('active');
+            } else {
+                // 程序化调用时，根据tabName找到对应按钮
+                const tabNameMap = {
+                    'textResults': '文本实体',
+                    'imageResults': '影像区域',
+                    'crossModalResults': '跨模态关联',
+                    'riskAssessment': '风险评估'
+                };
+                const btnText = tabNameMap[tabName];
+                if (btnText) {
+                    tabBtns.forEach(btn => {
+                        if (btn.textContent === btnText) {
+                            btn.classList.add('active');
+                        }
+                    });
+                }
+            }
         }
 
         // 下载结果

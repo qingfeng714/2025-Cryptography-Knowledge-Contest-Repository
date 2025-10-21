@@ -315,8 +315,14 @@ class CrossModalAttentionService:
         :return: 检测结果
         """
         try:
-            # 读取CSV文件
-            df = pd.read_csv(csv_path, encoding='utf-8', encoding_errors='ignore')
+            # 读取CSV文件（自动检测编码）
+            try:
+                df = pd.read_csv(csv_path, encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(csv_path, encoding='gbk')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(csv_path, encoding='latin1')
             
             # 按列名精确提取敏感信息
             entities = []
