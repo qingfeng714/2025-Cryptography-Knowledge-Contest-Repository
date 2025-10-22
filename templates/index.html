@@ -106,9 +106,57 @@
 
         <!-- 保护结果 -->
         <div id="protectionResults" class="protection-section" style="display:none;">
-            <h2>保护结果</h2>
+            <h2>🔒 保护结果</h2>
             <div id="protectionStatus"></div>
             <div id="protectedData"></div>
+            
+            <div class="action-buttons" style="margin-top: 20px;">
+                <button id="storageIngestBtn" class="btn btn-primary" style="display:none;">存储入库</button>
+                <button id="viewStorageBtn" class="btn btn-info" onclick="showStorageManagement()">查看存储</button>
+            </div>
+        </div>
+
+        <!-- 存储管理 -->
+        <div id="storageManagement" class="results-section" style="display:none;">
+            <h2>📦 存储管理</h2>
+            
+            <div class="results-tabs">
+                <button class="tab-btn active" onclick="showStorageTab('storageObjects')">存储对象</button>
+                <button class="tab-btn" onclick="showStorageTab('storageBatches')">批次列表</button>
+                <button class="tab-btn" onclick="showStorageTab('storageStats')">统计信息</button>
+                <button class="tab-btn" onclick="showStorageTab('verificationTab')">验证工具</button>
+            </div>
+
+            <div id="storageObjects" class="tab-content active">
+                <h3>存储对象列表</h3>
+                <button onclick="loadStorageObjects()" class="btn btn-secondary" style="margin-bottom:15px;">刷新列表</button>
+                <div id="storageObjectsList"></div>
+            </div>
+
+            <div id="storageBatches" class="tab-content">
+                <h3>批次列表</h3>
+                <button onclick="loadStorageBatches()" class="btn btn-secondary" style="margin-bottom:15px;">刷新列表</button>
+                <div id="storageBatchesList"></div>
+            </div>
+
+            <div id="storageStats" class="tab-content">
+                <h3>存储统计</h3>
+                <button onclick="loadStorageStats()" class="btn btn-secondary" style="margin-bottom:15px;">刷新统计</button>
+                <div id="storageStatsDisplay"></div>
+            </div>
+
+            <div id="verificationTab" class="tab-content">
+                <h3>验证工具</h3>
+                <div class="form-group">
+                    <label for="verifyPatientId">Patient ID:</label>
+                    <input type="text" id="verifyPatientId" placeholder="输入Patient ID (如: patient00826)" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:4px;">
+                </div>
+                <div class="action-buttons">
+                    <button onclick="verifyRepo()" class="btn btn-primary">从仓库验证</button>
+                    <button onclick="buildAndVerifyBundle()" class="btn btn-success">构建并验证Bundle</button>
+                </div>
+                <div id="verificationResults" style="margin-top:20px;"></div>
+            </div>
         </div>
     </div>
 
@@ -520,6 +568,10 @@
             console.log('displayBatchModeResults called with:', data);
             document.getElementById('results').style.display = 'block';
             
+            // 保存检测结果到全局变量，供保护功能使用
+            currentDetectionResult = data;
+            currentBatchId = `batch_${Date.now()}`;
+            
             // 1. 处理文本实体 - 汇总所有CSV数据中的敏感信息
             displayBatchTextEntities(data);
             
@@ -533,6 +585,22 @@
                     <div style="padding: 20px; text-align: center; color: #666;">
                         <p>批量处理模式下，DICOM影像ROI信息已包含在元数据中。</p>
                         <p>共处理 ${data.matched} 个DICOM文件的元数据。</p>
+                    </div>
+                `;
+            }
+            
+            // 4. 显示风险指标
+            const riskMetrics = document.getElementById('riskMetrics');
+            if (riskMetrics) {
+                riskMetrics.innerHTML = `
+                    <div class="metric-item">
+                        <span>总病人数: ${data.total_patients}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>成功匹配: ${data.matched} / ${data.total_patients} (${data.match_rate.toFixed(1)}%)</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>未匹配: ${data.unmatched}</span>
                     </div>
                 `;
             }
@@ -841,6 +909,10 @@
             document.getElementById('progressText').textContent = text;
         }
 
+        // 全局变量：保存当前检测结果和批次ID
+        let currentDetectionResult = null;
+        let currentBatchId = null;
+
         // 执行保护
         async function executeProtection() {
             const protectBtn = document.getElementById('protectBtn');
@@ -848,37 +920,338 @@
             protectBtn.textContent = '正在保护...';
             
             try {
-                // 这里应该调用保护API
-                const response = await fetch('/api/protect', {
+                if (!currentDetectionResult) {
+                    showError('请先执行批量检测');
+                    return;
+                }
+                
+                updateProgress(10, '开始执行保护...');
+                showProgress();
+                
+                // 调用保护API
+                const response = await fetch('/api/protect_execute', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        session_id: 'current_session' // 实际应用中应该从当前会话获取
+                        detection_result: currentDetectionResult,
+                        batch_id: currentBatchId
                     })
                 });
                 
+                updateProgress(60, '保护中...');
+                
                 const result = await response.json();
                 
-                if (result.status === 'success') {
+                if (result.batch_id) {
+                    currentBatchId = result.batch_id;
+                    updateProgress(100, '保护完成！');
+                    
                     document.getElementById('protectionResults').style.display = 'block';
                     document.getElementById('protectionStatus').innerHTML = `
                         <div class="protection-success">
-                            <h3>保护完成</h3>
-                            <p>会话ID: ${result.artifact_id}</p>
-                            <p>保护状态: 成功</p>
+                            <h3>✅ 保护完成</h3>
+                            <p><strong>批次ID:</strong> ${result.batch_id}</p>
+                            <p><strong>保护数量:</strong> ${result.protected_count} 个对象</p>
+                            <p><strong>密钥提示:</strong> ${result.key_hint}</p>
+                            <p><strong>输出DICOM:</strong> ${result.output_dicom}</p>
+                            <p><strong>输出文本:</strong> ${result.output_text}</p>
+                            <p><strong>审计清单:</strong> ${result.audit_manifest}</p>
                         </div>
                     `;
+                    
+                    // 显示入库按钮
+                    document.getElementById('storageIngestBtn').style.display = 'inline-flex';
+                    document.getElementById('storageIngestBtn').onclick = function() {
+                        storageIngest(currentBatchId);
+                    };
+                    
+                    document.getElementById('protectionResults').scrollIntoView({ behavior: 'smooth' });
                 } else {
-                    showError('保护失败: ' + result.error);
+                    showError('保护失败: ' + (result.error || '未知错误'));
                 }
             } catch (error) {
                 showError('保护过程出错: ' + error.message);
             } finally {
+                hideProgress();
                 protectBtn.disabled = false;
                 protectBtn.textContent = '执行保护';
             }
+        }
+
+        // 存储入库
+        async function storageIngest(batchId) {
+            try {
+                updateProgress(10, '开始存储入库...');
+                showProgress();
+                
+                const response = await fetch('/api/storage/ingest', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        batch_id: batchId
+                    })
+                });
+                
+                updateProgress(60, '入库中...');
+                
+                const result = await response.json();
+                
+                if (result.batch_id) {
+                    updateProgress(100, '入库完成！');
+                    alert(`入库成功！\n批次ID: ${result.batch_id}\n入库数量: ${result.ingested}\n审计SHA256: ${result.audit_sha256}`);
+                } else {
+                    showError('入库失败: ' + (result.error || '未知错误'));
+                }
+            } catch (error) {
+                showError('入库过程出错: ' + error.message);
+            } finally {
+                hideProgress();
+            }
+        }
+
+        // 显示存储管理
+        function showStorageManagement() {
+            document.getElementById('storageManagement').style.display = 'block';
+            document.getElementById('storageManagement').scrollIntoView({ behavior: 'smooth' });
+            loadStorageObjects();
+        }
+
+        // 存储标签页切换
+        function showStorageTab(tabName) {
+            const tabContents = document.querySelectorAll('#storageManagement .tab-content');
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            const tabBtns = document.querySelectorAll('#storageManagement .tab-btn');
+            tabBtns.forEach(btn => btn.classList.remove('active'));
+            
+            const targetTab = document.getElementById(tabName);
+            if (targetTab) {
+                targetTab.classList.add('active');
+            }
+            
+            if (window.event && window.event.target) {
+                window.event.target.classList.add('active');
+            }
+        }
+
+        // 加载存储对象
+        async function loadStorageObjects() {
+            try {
+                const response = await fetch('/api/storage/list?limit=20&offset=0');
+                const result = await response.json();
+                
+                const list = document.getElementById('storageObjectsList');
+                if (result.objects && result.objects.length > 0) {
+                    let html = '<div class="entity-group">';
+                    result.objects.forEach(obj => {
+                        html += `
+                            <div class="entity-item">
+                                <span class="entity-type">ID#${obj.id}</span>
+                                <span class="entity-text">
+                                    <strong>Patient:</strong> ${obj.patient_id}<br>
+                                    <strong>SOP:</strong> ${obj.sop_uid || 'N/A'}<br>
+                                    <strong>Batch:</strong> ${obj.batch_id}<br>
+                                    <strong>DICOM SHA256:</strong> ${obj.dicom_sha256.substring(0, 16)}...
+                                </span>
+                                <span class="entity-confidence">${new Date(obj.timestamp).toLocaleString()}</span>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                    list.innerHTML = html;
+                } else {
+                    list.innerHTML = '<p style="text-align:center; color:#666;">暂无存储对象</p>';
+                }
+            } catch (error) {
+                document.getElementById('storageObjectsList').innerHTML = `<p style="color:red;">加载失败: ${error.message}</p>`;
+            }
+        }
+
+        // 加载批次列表
+        async function loadStorageBatches() {
+            try {
+                const response = await fetch('/api/storage/batches?limit=20');
+                const result = await response.json();
+                
+                const list = document.getElementById('storageBatchesList');
+                if (result.batches && result.batches.length > 0) {
+                    let html = '<div class="entity-group">';
+                    result.batches.forEach(batch => {
+                        html += `
+                            <div class="entity-item">
+                                <span class="entity-type">BATCH</span>
+                                <span class="entity-text">
+                                    <strong>ID:</strong> ${batch.batch_id}<br>
+                                    <strong>对象数:</strong> ${batch.count || 'N/A'}<br>
+                                    <strong>审计SHA256:</strong> ${batch.audit_sha256 ? batch.audit_sha256.substring(0, 16) + '...' : 'N/A'}<br>
+                                    <strong>签名:</strong> ${batch.has_signature ? '✅ 已签名' : '❌ 未签名'}
+                                </span>
+                                <span class="entity-confidence">${new Date(batch.timestamp).toLocaleString()}</span>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                    list.innerHTML = html;
+                } else {
+                    list.innerHTML = '<p style="text-align:center; color:#666;">暂无批次</p>';
+                }
+            } catch (error) {
+                document.getElementById('storageBatchesList').innerHTML = `<p style="color:red;">加载失败: ${error.message}</p>`;
+            }
+        }
+
+        // 加载存储统计
+        async function loadStorageStats() {
+            try {
+                const response = await fetch('/api/storage/stats');
+                const result = await response.json();
+                
+                const display = document.getElementById('storageStatsDisplay');
+                display.innerHTML = `
+                    <div class="batch-summary">
+                        <h4>📊 存储统计</h4>
+                        <p><strong>总对象数:</strong> ${result.total_objects}</p>
+                        <p><strong>总批次数:</strong> ${result.total_batches}</p>
+                        <p><strong>仓库路径:</strong> ${result.repo_path}</p>
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('storageStatsDisplay').innerHTML = `<p style="color:red;">加载失败: ${error.message}</p>`;
+            }
+        }
+
+        // 从仓库验证
+        async function verifyRepo() {
+            const patientId = document.getElementById('verifyPatientId').value.trim();
+            if (!patientId) {
+                alert('请输入Patient ID');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/verify/repo', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        patient_id: patientId
+                    })
+                });
+                
+                const result = await response.json();
+                displayVerificationResults(result, '仓库验证');
+            } catch (error) {
+                alert('验证失败: ' + error.message);
+            }
+        }
+
+        // 构建并验证Bundle
+        async function buildAndVerifyBundle() {
+            const patientId = document.getElementById('verifyPatientId').value.trim();
+            if (!patientId) {
+                alert('请输入Patient ID');
+                return;
+            }
+            
+            try {
+                // 先构建bundle
+                const buildResp = await fetch('/api/storage/bundle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        patient_id: patientId
+                    })
+                });
+                
+                const buildResult = await buildResp.json();
+                
+                if (buildResult.status !== 'success') {
+                    alert('构建Bundle失败: ' + (buildResult.error || '未知错误'));
+                    return;
+                }
+                
+                // 再验证bundle
+                const verifyResp = await fetch('/api/verify/bundle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        patient_id: patientId
+                    })
+                });
+                
+                const verifyResult = await verifyResp.json();
+                displayVerificationResults(verifyResult, 'Bundle验证', buildResult.bundle_path);
+                
+            } catch (error) {
+                alert('操作失败: ' + error.message);
+            }
+        }
+
+        // 显示验证结果
+        function displayVerificationResults(result, title, bundlePath) {
+            const display = document.getElementById('verificationResults');
+            
+            let html = `<h4>${title}结果</h4>`;
+            
+            if (result.error) {
+                html += `<div class="risk-item high"><p style="color:red;">错误: ${result.error}</p></div>`;
+            } else {
+                // 签名验证
+                if (result.sig_ok !== null) {
+                    html += `
+                        <div class="risk-item ${result.sig_ok ? 'low' : 'high'}">
+                            <h5>${result.sig_ok ? '✅' : '❌'} SPHINCS+签名验证</h5>
+                            <p><strong>状态:</strong> ${result.sig_ok ? '通过' : '失败'}</p>
+                        </div>
+                    `;
+                }
+                
+                // 对验证结果
+                if (result.pair) {
+                    const issues = result.pair.issues || [];
+                    html += `
+                        <div class="risk-item ${issues.length === 0 ? 'low' : 'medium'}">
+                            <h5>📋 DICOM-JSON对验证</h5>
+                            <p><strong>DICOM:</strong> ${result.pair.dicom}</p>
+                            <p><strong>JSON:</strong> ${result.pair.text}</p>
+                            <p><strong>问题数:</strong> ${issues.length}</p>
+                            ${issues.length > 0 ? `<p><strong>问题:</strong> ${issues.join('; ')}</p>` : '<p style="color:green;">✅ 无问题</p>'}
+                        </div>
+                    `;
+                    
+                    // Header信息
+                    if (result.pair.headers) {
+                        html += `<div class="risk-item low"><h5>📝 DICOM Header</h5>`;
+                        for (const [key, val] of Object.entries(result.pair.headers)) {
+                            html += `<p><strong>${key}:</strong> ${val}</p>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+                
+                // Bundle路径
+                if (bundlePath) {
+                    html += `
+                        <div class="risk-item low">
+                            <h5>📦 Bundle位置</h5>
+                            <p><strong>路径:</strong> ${bundlePath}</p>
+                            <a href="/api/storage/bundle/${document.getElementById('verifyPatientId').value}/download" 
+                               class="btn btn-success" style="margin-top:10px;">下载Bundle</a>
+                        </div>
+                    `;
+                }
+            }
+            
+            display.innerHTML = html;
         }
 
         // 显示进度

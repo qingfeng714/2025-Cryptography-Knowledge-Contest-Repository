@@ -2,14 +2,17 @@ import os
 import uuid
 import argparse
 import re
+import secrets
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_file
 import torch
 import pandas as pd
 from services.crossmodal_service import CrossModalAttentionService
-# 简化导入，去掉加密相关模块
 from services.audit_service import AuditLogger
 from services.cleanup_service import CleanupService
+from services.protection_service import ProtectionService
+from services.storage_audit_service import StorageAuditService
+from services.verification_service import VerificationService
 
 def create_app(config=None):
     """应用工厂函数"""
@@ -26,12 +29,26 @@ def create_app(config=None):
     app.audit_logger = AuditLogger()
     app.cleanup_service = CleanupService(upload_dir=app.config['UPLOAD_FOLDER'], max_age_hours=24)
     
+    # 初始化保护层服务
+    app.protection_key = secrets.token_hex(32)  # 生成32字节密钥
+    app.protection_svc = ProtectionService(key_hex=app.protection_key)
+    
+    # 初始化存储服务
+    storage_repo = app.config.get('STORAGE_REPO', './storage_repo')
+    app.storage_svc = StorageAuditService(repo_path=storage_repo)
+    
+    # 初始化验证服务
+    app.verification_svc = VerificationService()
+    
     # 启动定期清理任务（每1小时清理一次）
     app.cleanup_service.start_periodic_cleanup(interval_hours=1)
     print("[INFO] 文件清理服务已启动")
+    print(f"[INFO] 保护层密钥提示: {app.protection_key[:16]}...")
+    print(f"[INFO] 存储仓库路径: {storage_repo}")
 
-    # 确保上传目录存在
+    # 确保目录存在
     os.makedirs(app.config.get('UPLOAD_FOLDER'), exist_ok=True)
+    os.makedirs(app.config.get('OUTPUT_DIR'), exist_ok=True)
     
     # 添加请求错误处理
     @app.errorhandler(413)
@@ -423,6 +440,199 @@ def create_app(config=None):
         except Exception as e:
             app.audit_logger.log("batch", "process_error", str(e))
             return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/protect_execute", methods=["POST"])
+    def protect_execute():
+        """执行保护操作（批量）"""
+        try:
+            data = request.json
+            detection_result = data.get("detection_result")
+            batch_id = data.get("batch_id", f"batch_{uuid.uuid4().hex[:8]}")
+            
+            if not detection_result:
+                return jsonify({"error": "Missing detection_result"}), 400
+            
+            # 执行保护
+            output_dir = Path(app.config['OUTPUT_DIR']) / batch_id
+            result = app.protection_svc.protect_batch(
+                detection_result=detection_result,
+                output_dir=output_dir,
+                batch_id=batch_id
+            )
+            
+            app.audit_logger.log(batch_id, "protect_execute", "system")
+            return jsonify(result)
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[ERROR] 保护执行失败: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            app.audit_logger.log("system", "protect_error", error_msg)
+            return jsonify({"error": error_msg, "status": "error"}), 500
+    
+    @app.route("/api/storage/ingest", methods=["POST"])
+    def storage_ingest():
+        """存储入库"""
+        try:
+            data = request.json
+            batch_id = data.get("batch_id")
+            
+            if not batch_id:
+                return jsonify({"error": "Missing batch_id"}), 400
+            
+            # 查找保护后的文件
+            output_dir = Path(app.config['OUTPUT_DIR']) / batch_id
+            protected_dicom = output_dir / "protected_dicom"
+            protected_text = output_dir / "protected_text"
+            
+            if not protected_dicom.exists() or not protected_text.exists():
+                return jsonify({"error": "Protected files not found"}), 404
+            
+            # 入库
+            result = app.storage_svc.ingest_batch(
+                protected_dicom=protected_dicom,
+                protected_text=protected_text,
+                batch_id=batch_id
+            )
+            
+            app.audit_logger.log(batch_id, "storage_ingest", "system")
+            return jsonify(result)
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[ERROR] 存储入库失败: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": error_msg, "status": "error"}), 500
+    
+    @app.route("/api/storage/list", methods=["GET"])
+    def storage_list():
+        """列出存储的对象"""
+        try:
+            limit = int(request.args.get("limit", 20))
+            offset = int(request.args.get("offset", 0))
+            
+            objects = app.storage_svc.list_objects(limit=limit, offset=offset)
+            return jsonify({"objects": objects, "limit": limit, "offset": offset})
+            
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/storage/batches", methods=["GET"])
+    def storage_batches():
+        """列出批次"""
+        try:
+            limit = int(request.args.get("limit", 20))
+            batches = app.storage_svc.list_batches(limit=limit)
+            return jsonify({"batches": batches, "limit": limit})
+            
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/storage/stats", methods=["GET"])
+    def storage_stats():
+        """获取存储统计"""
+        try:
+            stats = app.storage_svc.get_stats()
+            return jsonify(stats)
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/storage/bundle", methods=["POST"])
+    def storage_bundle():
+        """构建bundle"""
+        try:
+            data = request.json
+            patient_id = data.get("patient_id")
+            
+            if not patient_id:
+                return jsonify({"error": "Missing patient_id"}), 400
+            
+            # 构建bundle
+            bundle_dir = Path(app.config['OUTPUT_DIR']) / "bundles"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            out_zip = bundle_dir / f"{patient_id}_bundle.zip"
+            
+            success = app.storage_svc.build_bundle(patient_id=patient_id, out_zip=out_zip)
+            
+            if success:
+                return jsonify({
+                    "status": "success",
+                    "bundle_path": str(out_zip),
+                    "patient_id": patient_id
+                })
+            else:
+                return jsonify({"error": "Patient ID not found"}), 404
+                
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/storage/bundle/<patient_id>/download", methods=["GET"])
+    def download_bundle(patient_id):
+        """下载bundle"""
+        try:
+            bundle_path = Path(app.config['OUTPUT_DIR']) / "bundles" / f"{patient_id}_bundle.zip"
+            
+            if not bundle_path.exists():
+                return jsonify({"error": "Bundle not found"}), 404
+            
+            return send_file(
+                str(bundle_path),
+                as_attachment=True,
+                download_name=f"{patient_id}_bundle.zip"
+            )
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/verify/bundle", methods=["POST"])
+    def verify_bundle():
+        """验证bundle"""
+        try:
+            data = request.json
+            patient_id = data.get("patient_id")
+            
+            if not patient_id:
+                return jsonify({"error": "Missing patient_id"}), 400
+            
+            bundle_path = Path(app.config['OUTPUT_DIR']) / "bundles" / f"{patient_id}_bundle.zip"
+            
+            if not bundle_path.exists():
+                return jsonify({"error": "Bundle not found"}), 404
+            
+            result = app.verification_svc.verify_bundle(bundle_path)
+            return jsonify(result)
+            
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/verify/repo", methods=["POST"])
+    def verify_repo():
+        """从仓库验证对象"""
+        try:
+            data = request.json
+            patient_id = data.get("patient_id")
+            
+            if not patient_id:
+                return jsonify({"error": "Missing patient_id"}), 400
+            
+            repo_path = Path(app.config.get('STORAGE_REPO', './storage_repo'))
+            result = app.verification_svc.verify_repo_object(repo_path, patient_id)
+            return jsonify(result)
+            
+        except Exception as e:
+            return jsonify({"error": str(e), "status": "error"}), 500
+    
+    @app.route("/api/key_info", methods=["GET"])
+    def key_info():
+        """获取密钥信息"""
+        import hashlib
+        key_hint = hashlib.sha256(bytes.fromhex(app.protection_key)).hexdigest()[:16]
+        return jsonify({
+            "key_hint": key_hint,
+            "key_length": len(app.protection_key),
+            "has_ascon": app.protection_svc.__class__.__module__ is not None
+        })
 
     @app.route("/")
     def index():

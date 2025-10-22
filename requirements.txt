@@ -1,9 +1,14 @@
-Flask==2.3.3
-Flask-CORS==4.0.0
-numpy==1.24.3
-pandas==1.5.3
-torch==2.0.1
-pydicom==2.4.3
-cryptography==41.0.3
-pyascon==1.0.0
-python-dotenv==1.0.0
+Flask
+Flask-CORS
+numpy
+pandas
+torch
+pydicom
+cryptography
+python-dotenv
+Pillow
+tqdm
+regex
+# 以下包可选，如果安装失败可以跳过
+# pyascon  # Ascon加密库，如果安装失败会使用fallback
+# pyspx    # SPHINCS+签名库，如果安装失败会禁用签名功能
