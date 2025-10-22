@@ -33,6 +33,7 @@ class DicomProcessingResult:
     roi_mask: Optional[np.ndarray] = None
     roi_boxes: Optional[List[Tuple[int,int,int,int]]] = None
     patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
     accession: Optional[str] = None
     study_date: Optional[str] = None
     institution: Optional[str] = None
@@ -66,6 +67,7 @@ class DicomProcessor:
                 roi_mask=roi_mask,
                 roi_boxes=roi_boxes,
                 patient_id=header.get("PatientID"),
+                patient_name=header.get("PatientName"),
                 accession=header.get("AccessionNumber"),
                 study_date=header.get("StudyDate"),
                 institution=header.get("InstitutionName"),

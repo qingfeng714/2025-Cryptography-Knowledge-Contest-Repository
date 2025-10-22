@@ -9,6 +9,10 @@ python-dotenv
 Pillow
 tqdm
 regex
+openpyxl
+xlrd
+opencv-python
+scikit-learn
 # 以下包可选，如果安装失败可以跳过
 # pyascon  # Ascon加密库，如果安装失败会使用fallback
 # pyspx    # SPHINCS+签名库，如果安装失败会禁用签名功能

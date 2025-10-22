@@ -247,7 +247,7 @@ class CrossModalAttentionService:
         risks = []
         
         # 检查高风险实体
-        high_risk_entities = ['PATIENT_ID', 'ID', 'NAME', 'PHONE']
+        high_risk_entities = ['PATIENT_ID', 'ID', 'NAME', 'PHONE', 'PATH']
         for entity in text_entities:
             if entity['type'] in high_risk_entities:
                 risk = {
@@ -258,13 +258,17 @@ class CrossModalAttentionService:
                 }
                 risks.append(risk)
         
-        # 检查跨模态关联风险
-        if dicom_metadata.get('patient_id') and any(e['type'] == 'PATIENT_ID' for e in text_entities):
-            risks.append({
-                'entity_type': 'CROSS_MODAL_MATCH',
-                'risk_level': 'critical',
-                'description': '文本和DICOM中的患者ID匹配，存在重识别风险'
-            })
+        # 检查跨模态关联风险（检查PATIENT_ID或PATH类型）
+        if dicom_metadata.get('patient_id'):
+            # 检查是否有PATIENT_ID或PATH类型的实体
+            has_patient_ref = any(e['type'] in ['PATIENT_ID', 'PATH'] for e in text_entities)
+            
+            if has_patient_ref:
+                risks.append({
+                    'entity_type': 'CROSS_MODAL_MATCH',
+                    'risk_level': 'critical',
+                    'description': '文本和DICOM中的患者ID匹配，存在重识别风险'
+                })
         
         return risks
     
@@ -310,19 +314,56 @@ class CrossModalAttentionService:
     def process_csv_detection(self, csv_path: str, dicom_path: Optional[str] = None) -> Dict:
         """
         处理单个CSV文件的检测
-        :param csv_path: CSV文件路径
+        :param csv_path: CSV文件路径（支持CSV和Excel格式）
         :param dicom_path: DICOM文件路径（可选）
         :return: 检测结果
         """
+        import time
+        start_time = time.time()  # 开始计时
+        
         try:
-            # 读取CSV文件（自动检测编码）
+            # 读取CSV/Excel文件（自动检测格式）
+            df = None
+            
+            # 先检查是否是Excel文件
             try:
-                df = pd.read_csv(csv_path, encoding='utf-8')
-            except UnicodeDecodeError:
+                # 尝试读取为Excel（先尝试openpyxl，失败则用xlrd读取旧格式.xls）
                 try:
-                    df = pd.read_csv(csv_path, encoding='gbk')
-                except UnicodeDecodeError:
-                    df = pd.read_csv(csv_path, encoding='latin1')
+                    df = pd.read_excel(csv_path, engine='openpyxl')
+                    print(f"成功读取Excel文件(openpyxl): {csv_path}")
+                except:
+                    df = pd.read_excel(csv_path, engine='xlrd')
+                    print(f"成功读取Excel文件(xlrd): {csv_path}")
+            except Exception as excel_error:
+                print(f"Excel读取失败，尝试CSV: {excel_error}")
+                # 如果不是Excel，尝试CSV（自动检测编码和分隔符）
+                # 常见分隔符：逗号、制表符、空格
+                separators = [',', '\t', ' ', ';', '|']
+                encodings = ['utf-8', 'gbk', 'latin1', 'gb2312', 'utf-16']
+                
+                for encoding in encodings:
+                    for sep in separators:
+                        try:
+                            df = pd.read_csv(csv_path, encoding=encoding, sep=sep, engine='python')
+                            # 检查是否成功读取（至少有2列）
+                            if df.shape[1] >= 2:
+                                print(f"成功读取CSV文件 - 编码:{encoding}, 分隔符:{repr(sep)}, 形状:{df.shape}")
+                                break
+                        except Exception:
+                            continue
+                    if df is not None and df.shape[1] >= 2:
+                        break
+                
+                # 如果上面都失败，最后尝试自动检测
+                if df is None or df.shape[1] < 2:
+                    try:
+                        df = pd.read_csv(csv_path, encoding='utf-8', sep=None, engine='python')
+                        print(f"成功读取CSV文件(自动检测): {csv_path}, 形状:{df.shape}")
+                    except:
+                        pass
+            
+            if df is None or df.shape[1] < 2:
+                raise ValueError(f"无法读取文件或文件格式不正确: {csv_path}")
             
             # 按列名精确提取敏感信息
             entities = []
@@ -344,12 +385,15 @@ class CrossModalAttentionService:
                     if col_name in df.columns and pd.notna(row[col_name]):
                         value = str(row[col_name]).strip()
                         if value and value != '':
+                            # 根据实体类型和数据质量动态计算置信度
+                            confidence = self._calculate_entity_confidence(entity_type, value, col_name)
+                            
                             entities.append({
                                 'type': entity_type,
                                 'text': value,
                                 'start': entity_id,
                                 'end': entity_id + len(value),
-                                'confidence': 0.98,
+                                'confidence': confidence,
                                 'row_index': idx,
                                 'column': col_name
                             })
@@ -363,6 +407,10 @@ class CrossModalAttentionService:
             
             # 如果有DICOM，处理DICOM元数据
             dicom_metadata = {}
+            roi_mask_serializable = None
+            image_features_serializable = None
+            roi_type = None
+            
             if dicom_path and Path(dicom_path).exists():
                 from services.roi_service import DicomProcessor
                 processor = DicomProcessor(device=self.device)
@@ -371,25 +419,48 @@ class CrossModalAttentionService:
                 if dicom_result:
                     dicom_metadata = {
                         'patient_id': dicom_result.patient_id,
+                        'patient_name': dicom_result.patient_name,
                         'accession': dicom_result.accession,
                         'study_date': dicom_result.study_date,
                         'institution': dicom_result.institution,
                         'patient_sex': dicom_result.patient_sex,
                         'patient_age': dicom_result.patient_age
                     }
+                    
+                    # 处理ROI mask
+                    if dicom_result.roi_mask is not None:
+                        roi_mask_serializable = {
+                            "shape": list(dicom_result.roi_mask.shape),
+                            "dtype": str(dicom_result.roi_mask.dtype),
+                            "has_roi": bool(dicom_result.roi_mask.any()),
+                            "roi_type": dicom_result.roi_type or "unknown"
+                        }
+                        roi_type = dicom_result.roi_type
+                    
+                    # 处理image features
+                    if dicom_result.normalized_tensor is not None:
+                        image_features_serializable = {
+                            "shape": list(dicom_result.normalized_tensor.shape),
+                            "dtype": str(dicom_result.normalized_tensor.dtype),
+                            "device": str(dicom_result.normalized_tensor.device)
+                        }
             
             # 跨模态匹配
             mappings = self._match_text_dicom_entities(entities, dicom_metadata)
             
+            # 计算实际处理时间
+            processing_time = time.time() - start_time
+            
             # 计算风险指标
-            metrics = self._calculate_risk_metrics(entities, mappings, 0.1)
+            metrics = self._calculate_risk_metrics(entities, mappings, processing_time)
             
             # 返回结果（不调用detect_phi_mapping，直接构建结果）
             result = {
                 'text_entities': entities,
                 'image_regions': {
-                    'roi_mask': None,
-                    'image_features': None
+                    'roi_mask': roi_mask_serializable,
+                    'image_features': image_features_serializable,
+                    'roi_type': roi_type
                 },
                 'mappings': mappings,
                 'metrics': metrics,
@@ -465,6 +536,82 @@ class CrossModalAttentionService:
         pixel_array = (pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min() + 1e-6)
         tensor = torch.FloatTensor(pixel_array).unsqueeze(0).unsqueeze(0).to(self.device)
         return pixel_array, tensor
+    
+    def _calculate_entity_confidence(self, entity_type: str, value: str, column_name: str) -> float:
+        """
+        根据实体类型和数据质量动态计算置信度
+        
+        置信度计算因素：
+        1. 实体类型重要性（ID、PATH > NAME > 其他）
+        2. 数据格式正确性
+        3. 数据完整性
+        """
+        import re
+        
+        # 基础置信度（根据实体类型）
+        base_confidence = {
+            'PATIENT_ID': 0.99,   # 最高 - 主键
+            'PATH': 0.99,         # 最高 - 文件路径
+            'ID': 0.95,           # 很高 - 身份证号
+            'PHONE': 0.92,        # 高 - 电话号码
+            'NAME': 0.90,         # 高 - 姓名
+            'PATIENT_SEX': 0.88,  # 中高 - 性别
+            'PATIENT_AGE': 0.85,  # 中高 - 年龄
+            'ADDRESS': 0.80,      # 中 - 地址
+        }.get(entity_type, 0.75)
+        
+        # 数据质量调整
+        quality_boost = 0.0
+        
+        # 检查PATIENT_ID格式 (例如: patient00826)
+        if entity_type == 'PATIENT_ID':
+            if re.match(r'^patient\d{5}$', value.lower()):
+                quality_boost += 0.01  # 标准格式，总置信度达到100%
+        
+        # 检查PATH格式
+        elif entity_type == 'PATH':
+            if 'patient' in value.lower() and re.search(r'\d{5}', value):
+                quality_boost += 0.01  # 包含patient ID，总置信度达到100%
+        
+        # 检查电话号码格式
+        elif entity_type == 'PHONE':
+            if re.match(r'^1[3-9]\d{9}$', value):  # 11位手机号
+                quality_boost += 0.05
+            elif re.match(r'^\d{11}$', value):     # 11位数字
+                quality_boost += 0.02
+        
+        # 检查身份证号格式
+        elif entity_type == 'ID':
+            if re.match(r'^\d{17}[\dXx]$', value):  # 18位身份证
+                quality_boost += 0.04
+            elif re.match(r'^\d{15}$', value):      # 15位身份证
+                quality_boost += 0.03
+        
+        # 检查性别
+        elif entity_type == 'PATIENT_SEX':
+            if value.upper() in ['M', 'F', 'MALE', 'FEMALE', '男', '女']:
+                quality_boost += 0.07  # 标准值，提升到95%
+        
+        # 检查年龄
+        elif entity_type == 'PATIENT_AGE':
+            try:
+                age = int(value)
+                if 0 < age < 120:  # 合理年龄范围
+                    quality_boost += 0.10  # 有效年龄，提升到95%
+            except ValueError:
+                quality_boost -= 0.10  # 不是有效数字
+        
+        # 数据长度检查（不能太短或太长）
+        if entity_type == 'NAME':
+            if 2 <= len(value) <= 50:
+                quality_boost += 0.05
+            else:
+                quality_boost -= 0.10
+        
+        # 最终置信度（确保在0.5-1.0范围内）
+        final_confidence = min(1.0, max(0.5, base_confidence + quality_boost))
+        
+        return round(final_confidence, 2)
     
     def _extract_entities(self, text: str) -> List[Dict]:
         """增强的实体识别"""

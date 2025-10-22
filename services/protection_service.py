@@ -2,7 +2,7 @@
 保护层服务 - 基于 Ascon AEAD + FPE
 将检测结果进行加密保护，支持DICOM和CSV数据
 """
-import hashlib, base64, re, json, time
+import hashlib, base64, re, json, time, uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
@@ -248,13 +248,17 @@ class ProtectionService:
             if not item.get('matched'):
                 continue
             
+            # 获取patient_id作为统一文件名
+            patient_id = item.get('patient_id', f"unknown_{uuid.uuid4().hex[:8]}")
+            
             # 保护DICOM
             dicom_meta = item.get('dicom_metadata', {})
             dicom_file = dicom_meta.get('filepath')
             
             if dicom_file and Path(dicom_file).exists():
                 dcm_path = Path(dicom_file)
-                dicom_out = out_dicom / dcm_path.name
+                # 使用patient_id作为输出文件名，确保DICOM和JSON文件名匹配
+                dicom_out = out_dicom / f"{patient_id}.dcm"
                 m_dcm = self.protect_dicom(dcm_path, dicom_out, assoc=batch_id)
             else:
                 m_dcm = {"error": "DICOM not found"}
@@ -274,7 +278,7 @@ class ProtectionService:
                 "columns_cipher": m_txt["cipher_by_col"],
             }
             
-            patient_id = item.get('patient_id', 'unknown')
+            # 使用相同的patient_id作为JSON文件名
             out_text_path = out_text / f"{patient_id}.json"
             out_text_path.write_text(json.dumps(text_bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
             

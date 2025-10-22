@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>医疗隐私保护系统 - 跨模态检测</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20251022">
     <script src="https://cdn.jsdelivr.net/npm/dicom-parser@1.8.3/dist/dicomParser.min.js"></script>
 </head>
 <body>
@@ -217,6 +220,7 @@
                     const dicomResult = await dicomResponse.json();
                     if (dicomResult.status === 'success') {
                         dicomPath = dicomResult.dicom_path;
+                        currentDicomPath = dicomPath;  // 保存到全局变量
                     }
                 }
                 
@@ -234,6 +238,16 @@
                 });
                 
                 const detectionResult = await detectionResponse.json();
+                
+                // 保存检测结果到全局变量，供保护功能使用
+                currentDetectionResult = detectionResult;
+                currentBatchId = detectionResult.ingest_id || `single_${Date.now()}`;
+                console.log('[DEBUG] 单文件检测完成，已保存结果:', {
+                    currentDetectionResult: currentDetectionResult,
+                    currentBatchId: currentBatchId,
+                    currentDicomPath: currentDicomPath
+                });
+                
                 displayResults(detectionResult);
             } catch (error) {
                 showError('处理失败: ' + error.message);
@@ -481,6 +495,28 @@
             } else {
                 console.log('未检测到实体，结果:', result); // 添加调试信息
                 entitiesList.innerHTML = '<p style="text-align: center; color: #6c757d; padding: 30px;">未检测到敏感实体</p>';
+            }
+            
+            // 显示影像ROI区域
+            const roiDisplay = document.getElementById('roiDisplay');
+            roiDisplay.innerHTML = '';
+            
+            const imageRegions = result.image_regions || result.roi_regions || {};
+            if (imageRegions.roi_mask && imageRegions.roi_mask.has_roi) {
+                roiDisplay.innerHTML = `
+                    <div class="entity-item" style="background: #e7f3ff; border-left-color: #2196F3;">
+                        <span class="entity-type">ROI</span>
+                        <span class="entity-text">
+                            <strong>检测到ROI区域</strong><br>
+                            类型: ${imageRegions.roi_type || imageRegions.roi_mask.roi_type || 'unknown'}<br>
+                            形状: ${imageRegions.roi_mask.shape ? imageRegions.roi_mask.shape.join(' x ') : 'N/A'}<br>
+                            数据类型: ${imageRegions.roi_mask.dtype || 'N/A'}
+                        </span>
+                        <span class="entity-confidence">已检测</span>
+                    </div>
+                `;
+            } else {
+                roiDisplay.innerHTML = '<p style="text-align: center; color: #6c757d; padding: 30px;">未检测到ROI区域</p>';
             }
             
             // 显示跨模态关联
@@ -912,21 +948,89 @@
         // 全局变量：保存当前检测结果和批次ID
         let currentDetectionResult = null;
         let currentBatchId = null;
+        let currentDicomPath = null;  // 保存DICOM文件路径
+        
+        // 辅助函数：从检测结果中提取patient_id
+        function extractPatientId(result) {
+            // 从text_entities中查找PATH类型，提取patient_id
+            const entities = result.text_entities || result.entities || [];
+            for (const entity of entities) {
+                if (entity.type === 'PATH' && entity.text) {
+                    const match = entity.text.match(/patient(\d+)/i);
+                    if (match) {
+                        return 'patient' + match[1];
+                    }
+                }
+            }
+            // 如果没找到，使用ingest_id
+            return result.ingest_id || 'unknown';
+        }
+        
+        // 辅助函数：将实体列表转换为CSV数据格式
+        function convertEntitiesToCSVData(entities) {
+            const csvData = {};
+            for (const entity of entities) {
+                const column = entity.column || entity.type;
+                csvData[column] = entity.text;
+            }
+            return csvData;
+        }
 
         // 执行保护
         async function executeProtection() {
+            console.log('[DEBUG] 执行保护函数调用，当前状态:', {
+                currentDetectionResult: currentDetectionResult,
+                currentBatchId: currentBatchId,
+                currentDicomPath: currentDicomPath
+            });
+            
             const protectBtn = document.getElementById('protectBtn');
             protectBtn.disabled = true;
             protectBtn.textContent = '正在保护...';
             
             try {
                 if (!currentDetectionResult) {
-                    showError('请先执行批量检测');
+                    console.error('[ERROR] currentDetectionResult为空');
+                    showError('请先执行检测（单文件或批量）');
+                    protectBtn.disabled = false;
+                    protectBtn.textContent = '执行保护';
                     return;
                 }
                 
                 updateProgress(10, '开始执行保护...');
                 showProgress();
+                
+                // 判断是单文件还是批量
+                let protectionData;
+                if (currentDetectionResult.results && currentDetectionResult.results.length > 0) {
+                    // 批量模式：已经是正确格式
+                    protectionData = {
+                        detection_result: currentDetectionResult,
+                        batch_id: currentBatchId
+                    };
+                } else {
+                    // 单文件模式：转换为批量格式
+                    // 从当前检测结果构造一个批量格式的结果
+                    const singleResult = {
+                        results: [{
+                            matched: true,
+                            patient_id: extractPatientId(currentDetectionResult),
+                            csv_data: convertEntitiesToCSVData(currentDetectionResult.text_entities || []),
+                            dicom_metadata: {
+                                filepath: currentDicomPath || null,  // 需要从上传时保存
+                                patient_id: extractPatientId(currentDetectionResult)
+                            },
+                            confidence: 1.0,
+                            risk_level: 'high'
+                        }],
+                        total_patients: 1,
+                        matched: 1
+                    };
+                    protectionData = {
+                        detection_result: singleResult,
+                        batch_id: currentBatchId
+                    };
+                }
                 
                 // 调用保护API
                 const response = await fetch('/api/protect_execute', {
@@ -934,10 +1038,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        detection_result: currentDetectionResult,
-                        batch_id: currentBatchId
-                    })
+                    body: JSON.stringify(protectionData)
                 });
                 
                 updateProgress(60, '保护中...');
