@@ -69,7 +69,7 @@ Cmd + Shift + R
 或
 
 ```
-完全重启服务.bat
+start_server.bat
 ```
 
 ### 验证修复
@@ -92,7 +92,7 @@ Cmd + Shift + R
 **完全重启**：
 1. 关闭所有浏览器窗口
 2. 停止Flask服务（Ctrl+C）
-3. 双击运行 `完全重启服务.bat`
+3. 双击运行 `start_server.bat`
 4. 使用无痕模式打开浏览器（Ctrl+Shift+N）
 5. 访问 http://127.0.0.1:5000
 
@@ -130,11 +130,11 @@ protected_text/patient00001.json  (patient_id格式)
 
 ### 解决方案
 
-#### 方法1：完全重启服务（推荐）
+#### 方法1：重启服务（推荐）
 
 **双击运行**：
 ```
-完全重启服务.bat
+start_server.bat
 ```
 
 这个脚本会：
@@ -142,7 +142,7 @@ protected_text/patient00001.json  (patient_id格式)
 2. ✅ 删除Python字节码缓存（.pyc）
 3. ✅ 删除旧的输出文件
 4. ✅ 删除旧的数据库
-5. ✅ 重新启动服务
+5. [OK] 重新启动服务
 
 #### 方法2：手动清理
 
@@ -173,7 +173,7 @@ python app.py --port 5000
 
 运行数据库检查：
 ```bash
-python 调试_检查数据库.py
+python debug_database.py
 ```
 
 **成功示例**：
@@ -238,14 +238,14 @@ Ctrl + C
 # 删除缓存
 Remove-Item services\__pycache__\crossmodal_service.cpython-*.pyc -Force
 
-# 启动服务
+# Start Server
 python app.py --port 5000
 ```
 
 #### 方法2：一键重启
 
 ```
-完全重启服务.bat
+start_server.bat
 ```
 
 #### 方法3：强制刷新浏览器
@@ -296,7 +296,7 @@ processor.process_dicom(Path(dicom_path), try_burnedin=False)
 #### 方案2：使用GPU加速
 
 ```python
-# 启动服务时使用GPU
+# Start Server时使用GPU
 service = CrossModalAttentionService(device='cuda')
 ```
 
@@ -316,7 +316,7 @@ from multiprocessing import Pool
 ### 验证优化
 
 ```bash
-python 测试_性能指标验证.py
+python test_performance_metrics.py
 ```
 
 **预期**：
@@ -428,7 +428,7 @@ python app.py --port 5001
 ### 1. 数据库检查
 
 ```bash
-python 调试_检查数据库.py
+python debug_database.py
 ```
 
 **检查项**：
@@ -452,7 +452,7 @@ python 调试_检查数据库.py
 ### 3. 性能测试
 
 ```bash
-python 测试_性能指标验证.py
+python test_performance_metrics.py
 ```
 
 **输出分析**：
@@ -496,7 +496,7 @@ python 测试_性能指标验证.py
 
 1. **Flask日志**（完整输出）
 2. **浏览器Console日志**（F12 → Console）
-3. **数据库检查结果**（`python 调试_检查数据库.py`）
+3. **数据库检查结果**（`python debug_database.py`）
 4. **性能测试结果**（`performance_test_result.json`）
 5. **文件列表**（`dir output\batch_*\protected_*`）
 
@@ -505,7 +505,7 @@ python 测试_性能指标验证.py
 **完全重置**（清除所有数据）：
 ```bash
 # 运行重置脚本
-完全重启服务.bat
+start_server.bat
 
 # 或手动执行
 Remove-Item output -Recurse -Force
@@ -524,9 +524,9 @@ python app.py --port 5000
 
 ## 📚 相关文档
 
-- [测试指南](测试指南.md) - 完整测试流程
-- [系统总览](系统总览.md) - 系统架构说明
-- [存储架构](存储架构.md) - 存储机制详解
+- [测试指南](TESTING_GUIDE.md) - 完整测试流程
+- [系统总览](SYSTEM_OVERVIEW.md) - 系统架构说明
+- [存储架构](STORAGE_ARCHITECTURE.md) - 存储机制详解
 
 ---
 

@@ -14,13 +14,13 @@
 
 **双击运行**：
 ```
-运行_性能测试.bat
+run_performance_test.bat
 ```
 
 ### 方法2：命令行测试
 
 ```bash
-python 测试_性能指标验证.py
+python test_performance_metrics.py
 ```
 
 ---
@@ -101,7 +101,7 @@ python -m pytest tests/test_storage.py
 
 #### 单文件处理测试
 
-1. **启动服务**
+1. **Start Server**
    ```bash
    python app.py --port 5000
    ```
@@ -137,7 +137,7 @@ python -m pytest tests/test_storage.py
 #### 准确率测试
 
 ```bash
-python 测试_性能指标验证.py
+python test_performance_metrics.py
 ```
 
 **预期输出**：
@@ -152,7 +152,7 @@ python 测试_性能指标验证.py
 #### 速度测试
 
 ```bash
-python 测试_性能指标验证.py
+python test_performance_metrics.py
 ```
 
 **预期输出**：
@@ -168,7 +168,7 @@ python 测试_性能指标验证.py
 #### 检查数据库状态
 
 ```bash
-python 调试_检查数据库.py
+python debug_database.py
 ```
 
 **验证项**：
@@ -309,7 +309,7 @@ service = CrossModalAttentionService(device='cuda')
 ### 1. 数据库检查
 
 ```bash
-python 调试_检查数据库.py
+python debug_database.py
 ```
 
 **检查项**：
@@ -394,7 +394,7 @@ performance_test_result.json
 **报告内容**：
 ```json
 {
-  "timestamp": "2025-10-23 00:15:30",
+  "timestamp": "2024-10-23 12:15:30",
   "performance_metrics": {
     "processing_time_seconds": 0.985,
     "speed_pass": true,
@@ -416,14 +416,14 @@ performance_test_result.json
 
 ### 测试失败？
 
-1. **查看故障排除**: [故障排除.md](故障排除.md)
+1. **查看故障排除**: [故障排除](TROUBLESHOOTING.md)
 2. **检查日志**: Flask终端输出
-3. **运行诊断**: `python 调试_检查数据库.py`
+3. **运行诊断**: `python debug_database.py`
 4. **查看详细结果**: `performance_test_result.json`
 
 ---
 
 **文档版本**: v1.0  
 **最后更新**: 2025-10-23  
-**相关文档**: [系统总览](系统总览.md), [故障排除](故障排除.md)
+**相关文档**: [系统总览](SYSTEM_OVERVIEW.md), [故障排除](TROUBLESHOOTING.md)
 

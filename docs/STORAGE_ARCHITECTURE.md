@@ -419,7 +419,7 @@ token = fpe_encrypt(patient_id, nonce, key)
 
 **运行**：
 ```bash
-python 调试_检查数据库.py
+python debug_database.py
 ```
 
 **输出示例**：

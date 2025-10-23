@@ -656,7 +656,7 @@ opencv-python >= 4.5.0
 ```bash
 # 1. 克隆仓库
 git clone <repository-url>
-cd 2025-Cryptography-Knowledge-Contest-Repository
+cd medical-privacy-protection
 
 # 2. 创建虚拟环境
 python -m venv venv
@@ -668,7 +668,7 @@ pip install -r requirements.txt
 # 4. 创建必要目录
 mkdir -p uploads output
 
-# 5. 启动服务
+# 5. Start Server
 python app.py
 ```
 
@@ -751,12 +751,6 @@ gunicorn -w 4 -b 0.0.0.0:5000 app:app
 
 ---
 
-## 联系方式
-
-- **项目仓库**: `2025-Cryptography-Knowledge-Contest-Repository`
-- **维护团队**: 密码学知识竞赛团队
-- **最后更新**: 2025-10-21
-
 ---
 
 ## 附录
@@ -784,6 +778,5 @@ gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ---
 
 **文档版本**: v1.0  
-**生成日期**: 2025-10-21  
-**适用系统版本**: v1.0.0
+**最后更新**: 2025-10-23
 

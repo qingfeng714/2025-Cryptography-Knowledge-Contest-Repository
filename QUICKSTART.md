@@ -5,7 +5,7 @@
 ### 步骤1: 安装依赖
 
 ```bash
-cd 2025-Cryptography-Knowledge-Contest-Repository
+cd medical-privacy-protection
 
 # 创建虚拟环境（推荐）
 python -m venv venv
@@ -15,7 +15,7 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 步骤2: 启动服务
+### 步骤2: Start Server
 
 ```bash
 python app.py
@@ -231,7 +231,7 @@ curl -O http://localhost:5000/api/storage/bundle/patient00826/download
 执行完整流程后，您会看到以下目录结构：
 
 ```
-2025-Cryptography-Knowledge-Contest-Repository/
+medical-privacy-protection/
 ├── uploads/                    # 上传的临时文件（24小时后自动清理）
 │   ├── csv_abc123.csv
 │   └── batch_xyz/
@@ -326,7 +326,7 @@ pip install pyspx
 
 - **建议批次大小**: 100-500个DICOM文件/批次
 - **并发上传**: 浏览器会自动分批上传（每批100个）
-- **处理时间**: 约2-3秒/对象（包含检测+保护）
+- **处理时间**: 约0.04秒/患者（检测+加密+存储）
 
 ### 存储空间
 
